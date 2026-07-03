@@ -1,10 +1,10 @@
 plugins {
-    id 'java-conventions'
+    id 'spring-conventions'
 }
 
 dependencies {
     implementation 'org.flywaydb:flyway-core'
     implementation 'org.flywaydb:flyway-database-postgresql'
     implementation 'org.postgresql:postgresql'
-    runtimeOnly 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
 }
