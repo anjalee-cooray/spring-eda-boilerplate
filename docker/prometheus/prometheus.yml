@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: api-gateway
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['api-gateway:8080']
+
+  - job_name: example-command-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['example-command-service:8081']
+
+  - job_name: example-query-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['example-query-service:8082']
+
+  - job_name: example-consumer-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['example-consumer-service:8083']
+
+  - job_name: outbox-relay
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['outbox-relay:8084']

@@ -17,6 +17,12 @@ import org.springframework.web.filter.OncePerRequestFilter;
 /**
  * Extracts tenant_id and roles from the validated JWT and populates TenantContextHolder.
  * Runs after Spring Security's JWT authentication filter.
+ *
+ * Okta claim mapping:
+ *   tenant_id  — custom claim added via Okta Expression Language in the token inline hook
+ *   roles      — custom claim mapped from Okta groups (configured in Okta admin console)
+ *
+ * For local dev, mock-oauth2-server injects these claims via its JSON_CONFIG.
  */
 public class TenantContextFilter extends OncePerRequestFilter {
 
