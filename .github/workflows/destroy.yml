@@ -1,0 +1,58 @@
+name: Destroy Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to destroy (dev only)
+        required: true
+        type: choice
+        options: [dev]
+      confirm:
+        description: Type "destroy" to confirm
+        required: true
+
+jobs:
+  guard:
+    name: Confirm Destruction
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "destroy" ]; then
+            echo "Confirmation text does not match. Aborting."
+            exit 1
+          fi
+          if [ "${{ github.event.inputs.environment }}" != "dev" ]; then
+            echo "Destroy is only allowed for the dev environment."
+            exit 1
+          fi
+
+  destroy:
+    name: Destroy ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: guard
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Destroy services
+        run: |
+          echo "Destroying all services in ${{ github.event.inputs.environment }}..."
+          # Replace with your destroy command:
+          #   ECS:   aws ecs delete-service --cluster $CLUSTER --service $SERVICE --force
+          #   K8s:   kubectl delete namespace ${{ github.event.inputs.environment }}
+          echo "Services destroyed"
+
+      - name: Destroy infrastructure
+        run: |
+          echo "Destroying infrastructure in ${{ github.event.inputs.environment }}..."
+          # Terraform:
+          #   cd infra/environments/${{ github.event.inputs.environment }}
+          #   terraform destroy -auto-approve
+          echo "Infrastructure destroyed"
+
+      - name: Notify
+        if: always()
+        run: |
+          echo "Environment ${{ github.event.inputs.environment }} destroyed by ${{ github.actor }}"

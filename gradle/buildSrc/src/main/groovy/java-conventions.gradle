@@ -19,6 +19,31 @@ tasks.withType(Test).configureEach {
     useJUnitPlatform()
 }
 
+// Separate integration test source set — uses @Tag("integration") on test classes
+sourceSets {
+    integrationTest {
+        java.srcDir 'src/integrationTest/java'
+        resources.srcDir 'src/integrationTest/resources'
+        compileClasspath += main.output + test.output
+        runtimeClasspath += main.output + test.output
+    }
+}
+
+configurations {
+    integrationTestImplementation.extendsFrom testImplementation
+    integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Runs integration tests against live dependencies (Testcontainers).'
+    group = 'verification'
+    testClassesDirs = sourceSets.integrationTest.output.classesDirs
+    classpath = sourceSets.integrationTest.runtimeClasspath
+    jvmArgs '--enable-preview'
+    useJUnitPlatform()
+    shouldRunAfter test
+}
+
 tasks.withType(JavaExec).configureEach {
     jvmArgs '--enable-preview'
 }
@@ -43,4 +68,9 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    integrationTestImplementation 'org.springframework.boot:spring-boot-starter-test'
+    integrationTestImplementation 'org.testcontainers:junit-jupiter:1.20.4'
+    integrationTestImplementation 'org.testcontainers:postgresql:1.20.4'
+    integrationTestImplementation 'org.testcontainers:kafka:1.20.4'
 }
