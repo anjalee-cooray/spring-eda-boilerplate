@@ -1,0 +1,80 @@
+{
+  "title": "Service Health",
+  "uid": "eda-service-health",
+  "schemaVersion": 38,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP Request Rate (req/s)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(http_server_requests_seconds_count[1m])",
+          "legendFormat": "{{service}} {{uri}} {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "HTTP P99 Latency (ms)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(http_server_requests_seconds_bucket[1m])) * 1000",
+          "legendFormat": "{{service}} p99"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "HTTP Error Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(http_server_requests_seconds_count{status=~'5..'}[1m])",
+          "legendFormat": "{{service}} 5xx"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "JVM Heap Used (MB)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "jvm_memory_used_bytes{area='heap'} / 1024 / 1024",
+          "legendFormat": "{{service}} heap"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Outbox Pending Records",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 16, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(outbox_pending_records_total) or vector(0)",
+          "legendFormat": "pending"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Thread Count",
+      "type": "timeseries",
+      "gridPos": { "x": 6, "y": 16, "w": 12, "h": 4 },
+      "targets": [
+        {
+          "expr": "jvm_threads_total",
+          "legendFormat": "{{service}} threads"
+        }
+      ]
+    }
+  ]
+}

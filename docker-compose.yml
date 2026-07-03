@@ -183,10 +183,18 @@ services:
       QUERY_SERVICE_URL: http://example-query-service:8082
       REDIS_HOST: redis
       REDIS_PORT: 6379
+      OTEL_SERVICE_NAME: api-gateway
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      LOGGING_LOKI_URL: http://loki:3100
     depends_on:
       mock-oidc:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      tempo:
         condition: service_healthy
 
   example-command-service:
@@ -203,10 +211,18 @@ services:
       OIDC_ISSUER_URI: http://mock-oidc:8090/okta
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       EVENTS_BROKER: kafka
+      OTEL_SERVICE_NAME: example-command-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      LOGGING_LOKI_URL: http://loki:3100
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      tempo:
         condition: service_healthy
       db-migrations:
         condition: service_completed_successfully
@@ -226,10 +242,18 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       EVENTS_BROKER: kafka
       KAFKA_TOPICS: example.created
+      OTEL_SERVICE_NAME: example-query-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      LOGGING_LOKI_URL: http://loki:3100
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      tempo:
         condition: service_healthy
       db-migrations:
         condition: service_completed_successfully
@@ -248,10 +272,18 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       EVENTS_BROKER: kafka
       KAFKA_TOPICS: example.created
+      OTEL_SERVICE_NAME: example-consumer-service
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      LOGGING_LOKI_URL: http://loki:3100
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      tempo:
         condition: service_healthy
       db-migrations:
         condition: service_completed_successfully
@@ -271,10 +303,18 @@ services:
       EVENTS_BROKER: kafka
       RELAY_POLL_INTERVAL_MS: 1000
       RELAY_BATCH_SIZE: 50
+      OTEL_SERVICE_NAME: outbox-relay
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      LOGGING_LOKI_URL: http://loki:3100
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      tempo:
         condition: service_healthy
       db-migrations:
         condition: service_completed_successfully

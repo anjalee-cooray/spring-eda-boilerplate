@@ -5,4 +5,5 @@ plugins {
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter'
     implementation 'net.logstash.logback:logstash-logback-encoder:7.4'
+    implementation 'com.github.loki4j:loki-logback-appender:1.5.2'
 }

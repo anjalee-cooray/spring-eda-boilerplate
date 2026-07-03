@@ -41,3 +41,10 @@ management:
   endpoint:
     health:
       show-details: always
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  loki:
+    url: ${LOGGING_LOKI_URL:http://localhost:3100}

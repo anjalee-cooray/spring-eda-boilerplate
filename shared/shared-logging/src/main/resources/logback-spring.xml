@@ -2,20 +2,22 @@
 <configuration>
 
     <springProperty scope="context" name="appName" source="spring.application.name" defaultValue="app"/>
+    <springProperty scope="context" name="lokiUrl" source="logging.loki.url" defaultValue="http://localhost:3100"/>
 
+    <!-- Human-readable console for local/test profiles -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} [tid=%X{tenant_id} cid=%X{correlation_id} trace=%X{trace_id}] - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- JSON console for non-local profiles (stdout → Loki via Promtail or Docker driver) -->
     <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder class="net.logstash.logback.encoder.LogstashEncoder">
             <providers>
-                <timestamp>
-                    <fieldName>timestamp</fieldName>
-                    <timeZone>UTC</timeZone>
-                </timestamp>
-                <logLevel>
-                    <fieldName>level</fieldName>
-                </logLevel>
-                <loggerName>
-                    <fieldName>logger</fieldName>
-                </loggerName>
+                <timestamp><fieldName>timestamp</fieldName><timeZone>UTC</timeZone></timestamp>
+                <logLevel><fieldName>level</fieldName></logLevel>
+                <loggerName><fieldName>logger</fieldName></loggerName>
                 <message/>
                 <mdc/>
                 <stackTrace>
@@ -25,19 +27,28 @@
                         <shortenedClassNameLength>20</shortenedClassNameLength>
                     </throwableConverter>
                 </stackTrace>
-                <pattern>
-                    <pattern>{"service": "${appName}"}</pattern>
-                </pattern>
+                <pattern>{"service": "${appName}"}</pattern>
             </providers>
         </encoder>
     </appender>
 
+    <!-- Push logs directly to Loki (non-local profiles) -->
+    <appender name="LOKI" class="com.github.loki4j.logback.Loki4jAppender">
+        <http>
+            <url>${lokiUrl}/loki/api/v1/push</url>
+        </http>
+        <format>
+            <label>
+                <pattern>service=${appName},level=%level,tenant_id=%X{tenant_id}</pattern>
+            </label>
+            <message class="com.github.loki4j.logback.JsonLayout">
+                <appendLineSeparator>true</appendLineSeparator>
+            </message>
+            <sortByTime>true</sortByTime>
+        </format>
+    </appender>
+
     <springProfile name="local,test">
-        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
-            <encoder>
-                <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} [tid=%X{tenant_id} cid=%X{correlation_id}] - %msg%n</pattern>
-            </encoder>
-        </appender>
         <root level="INFO">
             <appender-ref ref="CONSOLE"/>
         </root>
@@ -46,6 +57,7 @@
     <springProfile name="!local,!test">
         <root level="INFO">
             <appender-ref ref="JSON_CONSOLE"/>
+            <appender-ref ref="LOKI"/>
         </root>
     </springProfile>
 
