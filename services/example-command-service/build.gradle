@@ -1,0 +1,14 @@
+plugins {
+    id 'spring-conventions'
+}
+
+dependencies {
+    implementation project(':shared:shared-logging')
+    implementation project(':shared:shared-telemetry')
+    implementation project(':shared:shared-security')
+    implementation project(':shared:shared-db')
+    implementation project(':shared:shared-events')
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.postgresql:postgresql'
+}

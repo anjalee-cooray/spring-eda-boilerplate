@@ -1,0 +1,9 @@
+plugins {
+    id 'java-conventions'
+}
+
+dependencies {
+    implementation project(':shared:shared-logging')
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'com.stripe:stripe-java:26.9.0'
+}

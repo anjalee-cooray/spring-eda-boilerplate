@@ -1,0 +1,8 @@
+plugins {
+    id 'java-conventions'
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'net.logstash.logback:logstash-logback-encoder:7.4'
+}

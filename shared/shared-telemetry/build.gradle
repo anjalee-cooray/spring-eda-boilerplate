@@ -1,0 +1,10 @@
+plugins {
+    id 'java-conventions'
+}
+
+dependencies {
+    implementation project(':shared:shared-logging')
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    implementation 'io.opentelemetry.instrumentation:opentelemetry-spring-boot-starter:2.10.0'
+}

@@ -1,0 +1,12 @@
+plugins {
+    id 'java-conventions'
+}
+
+dependencies {
+    implementation project(':shared:shared-logging')
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.kafka:spring-kafka'
+    implementation 'software.amazon.awssdk:sns:2.29.0'
+    implementation 'software.amazon.awssdk:sqs:2.29.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+}

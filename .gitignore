@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+gradle/buildSrc/.gradle/
+gradle/buildSrc/build/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.class
+
+# Spring Boot
+*.jar
+*.war
+*.ear
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.env
+
+# OTel agent
+opentelemetry-javaagent.jar

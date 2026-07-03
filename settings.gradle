@@ -1,0 +1,17 @@
+rootProject.name = 'spring-eda-boilerplate'
+
+// Shared libraries
+include ':shared:shared-logging'
+include ':shared:shared-telemetry'
+include ':shared:shared-security'
+include ':shared:shared-db'
+include ':shared:shared-events'
+include ':shared:shared-payments'
+
+// Services
+include ':services:db-migrations'
+include ':services:api-gateway'
+include ':services:example-command-service'
+include ':services:example-query-service'
+include ':services:example-consumer-service'
+include ':services:outbox-relay'
