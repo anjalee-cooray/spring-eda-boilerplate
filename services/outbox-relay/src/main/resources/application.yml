@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: outbox-relay
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/edadb}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+
+app:
+  events:
+    broker: ${EVENTS_BROKER:kafka}
+  relay:
+    poll-interval-ms: ${RELAY_POLL_INTERVAL_MS:1000}
+    batch-size: ${RELAY_BATCH_SIZE:50}
+
+server:
+  port: ${PORT:8084}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always

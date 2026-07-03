@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: api-gateway
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8080/realms/eda}
+
+  cloud:
+    gateway:
+      routes:
+        - id: command-service
+          uri: ${COMMAND_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/commands/**
+          filters:
+            - StripPrefix=1
+
+        - id: query-service
+          uri: ${QUERY_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/queries/**
+          filters:
+            - StripPrefix=1
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+server:
+  port: ${PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
