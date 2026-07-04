@@ -6,7 +6,7 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8080/realms/eda}
+          issuer-uri: ${OIDC_ISSUER_URI:http://localhost:8090/okta}
 
   cloud:
     gateway:
@@ -17,6 +17,10 @@ spring:
             - Path=/api/commands/**
           filters:
             - StripPrefix=1
+            - name: CircuitBreaker
+              args:
+                name: command-service
+                fallbackUri: forward:/fallback/command-service
 
         - id: query-service
           uri: ${QUERY_SERVICE_URL:http://localhost:8082}
@@ -24,6 +28,10 @@ spring:
             - Path=/api/queries/**
           filters:
             - StripPrefix=1
+            - name: CircuitBreaker
+              args:
+                name: query-service
+                fallbackUri: forward:/fallback/query-service
 
   data:
     redis:
@@ -48,3 +56,19 @@ management:
 logging:
   loki:
     url: ${LOGGING_LOKI_URL:http://localhost:3100}
+
+# Circuit breaker config for gateway routes
+# shared-resilience provides the base defaults — override per instance here if needed
+resilience4j:
+  circuitbreaker:
+    instances:
+      command-service:
+        sliding-window-size: 20
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 10s
+        permitted-calls-in-half-open-state: 5
+      query-service:
+        sliding-window-size: 20
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 10s
+        permitted-calls-in-half-open-state: 5

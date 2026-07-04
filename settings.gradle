@@ -7,6 +7,7 @@ include ':shared:shared-security'
 include ':shared:shared-db'
 include ':shared:shared-events'
 include ':shared:shared-payments'
+include ':shared:shared-resilience'
 
 // Services
 include ':services:db-migrations'

@@ -391,6 +391,91 @@ Grafana
 
 ---
 
+## Circuit Breaker
+
+The circuit breaker prevents cascading failures — when a downstream service is unhealthy, requests fail immediately instead of piling up and exhausting threads.
+
+### Where it applies
+
+```
+PROTECTED BY CIRCUIT BREAKER:        NOT NEEDED:
+  api-gateway → command-service         Kafka publishing (outbox handles it)
+  api-gateway → query-service           DB writes (transactions handle it)
+  command-service → Stripe API          Event consumption (retry handles it)
+```
+
+### Three states
+
+```
+CLOSED (normal)                OPEN (tripped)              HALF-OPEN (recovery check)
+  │                              │                            │
+  requests flow through          requests fail immediately    one test request allowed
+  failures counted               no downstream call made      success → CLOSED
+  threshold crossed ──────────►  wait 30s ──────────────────► fail → OPEN again
+```
+
+### api-gateway — route-level circuit breakers
+
+Each gateway route has its own circuit breaker. When `command-service` is down:
+
+```
+Client POST /api/commands/examples
+  │
+  ▼
+api-gateway — circuit breaker: command-service (OPEN)
+  │
+  ▼  fail fast — no connection attempt to command-service
+FallbackController.commandServiceFallback()
+  │
+  ▼
+HTTP 503 + Retry-After: 30
+  {
+    "error": "service_unavailable",
+    "message": "Command service is temporarily unavailable. Please retry in 30 seconds.",
+    "retryAfterSeconds": "30"
+  }
+```
+
+### Stripe — method-level circuit breaker
+
+Every `PaymentGateway` method is wrapped:
+
+```java
+return circuitBreaker.executeSupplier(() -> callStripe(request));
+// If OPEN → throws PaymentException("Payment service temporarily unavailable")
+// No Stripe API call is made — no timeout, no thread blocking
+```
+
+### Configuration
+
+`shared-resilience/resilience-defaults.yml` defines two base configs:
+
+| Config | Used for | Failure threshold | Open wait |
+|---|---|---|---|
+| `default` | Internal service calls | 50% of last 10 calls | 30s |
+| `external-api` | Stripe | 40% of last 10 calls | 60s |
+
+Override per instance in each service's `application.yml`.
+
+### Metrics in Grafana
+
+Resilience4j publishes to Micrometer automatically:
+
+```
+# Circuit breaker state: 0=CLOSED, 1=OPEN, 2=HALF_OPEN
+resilience4j_circuitbreaker_state{name="stripe"}
+
+# Current failure rate percentage
+resilience4j_circuitbreaker_failure_rate{name="command-service"}
+
+# Call counts by outcome
+resilience4j_circuitbreaker_calls_total{name="stripe", kind="successful|failed|not_permitted"}
+```
+
+Alert to set: `resilience4j_circuitbreaker_state == 1` → P2 alert, circuit breaker opened.
+
+---
+
 ## Shared library responsibilities
 
 Each shared library is a Spring Boot auto-configuration module — services include it as a dependency and it wires itself automatically via `AutoConfiguration.imports`.

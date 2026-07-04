@@ -1,0 +1,12 @@
+plugins {
+    id 'java-conventions'
+}
+
+dependencies {
+    implementation project(':shared:shared-logging')
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.github.resilience4j:resilience4j-spring-boot3:2.2.0'
+    implementation 'io.github.resilience4j:resilience4j-circuitbreaker:2.2.0'
+    implementation 'io.github.resilience4j:resilience4j-micrometer:2.2.0'
+}

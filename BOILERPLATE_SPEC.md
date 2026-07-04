@@ -35,6 +35,7 @@ Event-Driven Microservices with CQRS. Synchronous flows use HTTP (JWT-authentica
 | `shared-db` | RLS `SET LOCAL` interceptor, `OutboxWriter`, `InboxDeduplicator`, JPA base entities |
 | `shared-events` | `EventEnvelope` record, `EventPublisher` interface, Kafka + SNS/SQS implementations |
 | `shared-payments` | `PaymentGateway` interface, Stripe implementation, webhook verifier |
+| `shared-resilience` | Resilience4j circuit breaker auto-config, Micrometer metrics bridge, default configs |
 
 ---
 
