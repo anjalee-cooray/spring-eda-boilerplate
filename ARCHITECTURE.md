@@ -165,6 +165,69 @@ Use choreography by default. Upgrade to orchestration when flows branch signific
 
 ---
 
+### Circuit Breaker + Retry — Resilience
+
+Implemented in `shared-resilience`, applied to all synchronous calls that can fail or hang. Async event flows (outbox → Kafka) do not need these patterns — the outbox handles broker failures and Kafka handles consumer failures.
+
+**Where applied:**
+
+| Call | Circuit Breaker | Retry |
+|---|---|---|
+| `api-gateway → command-service` | `command-service` instance | `command-service` instance |
+| `api-gateway → query-service` | `query-service` instance | `query-service` instance |
+| `StripePaymentGateway → Stripe API` | `stripe` instance (external-api config) | `stripe` instance (external-api config) |
+
+**Decorator order — circuit breaker outside, retry inside:**
+
+```
+Request → CircuitBreaker → Retry → actual call
+                              ↑
+                   retries happen here (max 2 for Stripe, 3 for internal)
+          ↑
+          sees final outcome after all retries exhausted
+          only counts as a failure if all retries failed
+```
+
+This order is critical. If retry were outside the circuit breaker, each retry attempt would count as a separate call to the circuit breaker, tripping it on the first transient failure instead of after genuine sustained failure.
+
+**What triggers retry vs what is ignored:**
+
+```
+Retried:   IOException, ConnectException, TimeoutException  ← network problems
+Ignored:   PaymentException, IllegalArgumentException       ← business errors
+```
+
+A declined card wrapped in `PaymentException` is not retried — it will not succeed on a second attempt. Only genuine network failures are worth retrying.
+
+**Exponential backoff:**
+
+```
+Attempt 1: fails → wait 500ms
+Attempt 2: fails → wait 1000ms
+Attempt 3: fails → circuit breaker records final failure
+```
+
+Backoff gives the downstream service time to recover between attempts and avoids hammering an already struggling service.
+
+**When the circuit breaker opens:**
+
+```
+api-gateway routes → FallbackController → 503 + Retry-After header
+StripePaymentGateway → throws PaymentException("temporarily unavailable")
+```
+
+**Metrics exposed (Prometheus / Grafana):**
+
+```
+resilience4j_circuitbreaker_state{name="stripe"}           → 0=closed, 1=open, 2=half-open
+resilience4j_circuitbreaker_failure_rate{name="stripe"}    → current failure %
+resilience4j_retry_calls_total{name="stripe", kind="successful_with_retry|failed_with_retry|..."}
+```
+
+Alert condition: `resilience4j_circuitbreaker_state == 1` — circuit breaker opened.
+
+---
+
 ### Multi-Tenancy — PostgreSQL Row-Level Security
 
 Every tenant shares the same database. RLS ensures each tenant sees only their own rows — enforced inside the database, not in application code.
@@ -487,7 +550,8 @@ Each shared library is a Spring Boot auto-configuration module — services incl
 | `shared-security` | JWT resource server, tenant context filter | `TenantContextFilter`, `TenantContextHolder`, `SecurityAutoConfiguration` |
 | `shared-db` | RLS interceptor, outbox writer, inbox deduplicator | `RlsDataSourceInterceptor`, `OutboxWriter`, `InboxDeduplicator` |
 | `shared-events` | Event publisher (Kafka or SNS/SQS), no-op fallback | `KafkaEventPublisher`, `SnsEventPublisher`, `NoOpEventPublisher` |
-| `shared-payments` | Stripe payment gateway, webhook verifier | `StripePaymentGateway`, `StripeWebhookVerifier` |
+| `shared-payments` | Stripe payment gateway with circuit breaker + retry, webhook verifier | `StripePaymentGateway`, `StripeWebhookVerifier` |
+| `shared-resilience` | Circuit breaker + retry auto-config, Micrometer metrics binding, default configs | `ResilienceAutoConfiguration` |
 
 ---
 

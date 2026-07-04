@@ -1,7 +1,16 @@
 resilience4j:
+
+  # ── Circuit Breaker ────────────────────────────────────────────────────────
+  #
+  # Decorator order (outermost → innermost): CircuitBreaker → Retry → call
+  #
+  # The circuit breaker wraps the retry so it sees the final outcome after all
+  # retry attempts are exhausted. This prevents individual retry attempts from
+  # counting as separate failures and tripping the breaker prematurely.
+  #
   circuitbreaker:
     configs:
-      # Default config inherited by all instances unless overridden
+      # Inherited by all instances unless overridden
       default:
         sliding-window-type: COUNT_BASED
         sliding-window-size: 10
@@ -17,7 +26,7 @@ resilience4j:
           - java.util.concurrent.TimeoutException
           - java.net.ConnectException
 
-      # Tighter config for external payment APIs — fail fast, wait longer
+      # For external payment APIs — tighter threshold, longer recovery wait
       external-api:
         sliding-window-size: 10
         minimum-number-of-calls: 3
@@ -31,13 +40,55 @@ resilience4j:
           - java.net.ConnectException
 
     instances:
-      # Stripe payment API — uses external-api config
       stripe:
         base-config: external-api
-
-      # Internal service-to-service calls — uses default config
       command-service:
         base-config: default
+      query-service:
+        base-config: default
 
+  # ── Retry ──────────────────────────────────────────────────────────────────
+  #
+  # Only retry on network-level failures (IOException, ConnectException,
+  # TimeoutException). Never retry on business errors (PaymentException,
+  # validation failures) — those will not succeed on retry.
+  #
+  # Exponential backoff: wait 500ms, then 1s, then 2s between attempts.
+  # This gives the downstream service time to recover between retries.
+  #
+  retry:
+    configs:
+      default:
+        max-attempts: 3
+        wait-duration: 500ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - java.io.IOException
+          - java.net.ConnectException
+          - java.util.concurrent.TimeoutException
+        ignore-exceptions:
+          - java.lang.IllegalArgumentException
+          - java.lang.IllegalStateException
+
+      # External APIs: fewer retries, longer waits — avoid hammering a struggling service
+      external-api:
+        max-attempts: 2
+        wait-duration: 1s
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - java.io.IOException
+          - java.net.ConnectException
+          - java.util.concurrent.TimeoutException
+        ignore-exceptions:
+          - java.lang.IllegalArgumentException
+          - java.lang.IllegalStateException
+
+    instances:
+      stripe:
+        base-config: external-api
+      command-service:
+        base-config: default
       query-service:
         base-config: default

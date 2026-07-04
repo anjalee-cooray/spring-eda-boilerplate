@@ -17,12 +17,30 @@ import com.stripe.param.RefundCreateParams;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryRegistry;
 import jakarta.annotation.PostConstruct;
+import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+/**
+ * Stripe implementation of PaymentGateway.
+ *
+ * Resilience decorator order (outermost → innermost):
+ *   CircuitBreaker → Retry → Stripe API call
+ *
+ * The circuit breaker sees the final outcome after all retry attempts are
+ * exhausted — not each individual attempt. This means transient failures
+ * that succeed on retry do not count as failures toward the circuit breaker
+ * threshold.
+ *
+ * Only network-level exceptions trigger retries (IOException, ConnectException,
+ * TimeoutException). Business errors (PaymentException wrapping StripeException)
+ * are not retried — a declined card will not succeed on a second attempt.
+ */
 @Component
 @ConditionalOnProperty(name = "app.payments.provider", havingValue = "stripe", matchIfMissing = true)
 public class StripePaymentGateway implements PaymentGateway {
@@ -31,10 +49,15 @@ public class StripePaymentGateway implements PaymentGateway {
 
     private final StripeProperties properties;
     private final CircuitBreaker circuitBreaker;
+    private final Retry retry;
 
-    public StripePaymentGateway(StripeProperties properties, CircuitBreakerRegistry registry) {
+    public StripePaymentGateway(
+            StripeProperties properties,
+            CircuitBreakerRegistry circuitBreakerRegistry,
+            RetryRegistry retryRegistry) {
         this.properties = properties;
-        this.circuitBreaker = registry.circuitBreaker("stripe");
+        this.circuitBreaker = circuitBreakerRegistry.circuitBreaker("stripe");
+        this.retry = retryRegistry.retry("stripe");
     }
 
     @PostConstruct
@@ -44,41 +67,37 @@ public class StripePaymentGateway implements PaymentGateway {
 
     @Override
     public PaymentResult createPaymentIntent(PaymentRequest request) {
-        try {
-            return circuitBreaker.executeSupplier(() -> doCreatePaymentIntent(request));
-        } catch (CallNotPermittedException e) {
-            log.warn("Circuit breaker OPEN — Stripe createPaymentIntent rejected");
-            throw new PaymentException("Payment service temporarily unavailable", e);
-        }
+        return execute("createPaymentIntent", () -> doCreatePaymentIntent(request));
     }
 
     @Override
     public PaymentResult confirmPayment(String paymentIntentId) {
-        try {
-            return circuitBreaker.executeSupplier(() -> doConfirmPayment(paymentIntentId));
-        } catch (CallNotPermittedException e) {
-            log.warn("Circuit breaker OPEN — Stripe confirmPayment rejected id={}", paymentIntentId);
-            throw new PaymentException("Payment service temporarily unavailable", e);
-        }
+        return execute("confirmPayment", () -> doConfirmPayment(paymentIntentId));
     }
 
     @Override
     public RefundResult refund(RefundRequest request) {
-        try {
-            return circuitBreaker.executeSupplier(() -> doRefund(request));
-        } catch (CallNotPermittedException e) {
-            log.warn("Circuit breaker OPEN — Stripe refund rejected paymentIntentId={}", request.paymentIntentId());
-            throw new PaymentException("Payment service temporarily unavailable", e);
-        }
+        return execute("refund", () -> doRefund(request));
     }
 
     @Override
     public PaymentResult getPaymentIntent(String paymentIntentId) {
+        return execute("getPaymentIntent", () -> doGetPaymentIntent(paymentIntentId));
+    }
+
+    /**
+     * Applies CircuitBreaker → Retry decoration in the correct order.
+     * The circuit breaker is the outermost decorator so it evaluates
+     * the final result after all retry attempts are exhausted.
+     */
+    private <T> T execute(String operation, Supplier<T> call) {
+        Supplier<T> withRetry = Retry.decorateSupplier(retry, call);
+        Supplier<T> withCircuitBreaker = CircuitBreaker.decorateSupplier(circuitBreaker, withRetry);
         try {
-            return circuitBreaker.executeSupplier(() -> doGetPaymentIntent(paymentIntentId));
+            return withCircuitBreaker.get();
         } catch (CallNotPermittedException e) {
-            log.warn("Circuit breaker OPEN — Stripe getPaymentIntent rejected id={}", paymentIntentId);
-            throw new PaymentException("Payment service temporarily unavailable", e);
+            log.warn("Circuit breaker OPEN — Stripe {} rejected", operation);
+            throw new PaymentException("Payment service temporarily unavailable — please retry later", e);
         }
     }
 
