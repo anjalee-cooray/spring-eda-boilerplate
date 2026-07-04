@@ -1,6 +1,6 @@
 # spring-eda-boilerplate
 
-Production-ready boilerplate for building multi-tenant, event-driven SaaS backends on Java 25 and Spring Boot. Ships with multi-tenancy, CQRS, the Transactional Outbox pattern, idempotent consumers, saga orchestration, pluggable messaging (Kafka or SNS/SQS), pluggable auth (any OIDC provider), pluggable payments (Stripe), and a full Grafana LGTM observability stack — all wired together and ready to adopt.
+Production-ready boilerplate for building multi-tenant, event-driven SaaS backends on Java 25 and Spring Boot. Ships with multi-tenancy, CQRS, the Transactional Outbox pattern, idempotent consumers, event choreography, circuit breaker, retry, HTTP idempotency, pluggable messaging (Kafka or SNS/SQS), pluggable auth (any OIDC provider), pluggable payments (Stripe), and a full Grafana LGTM observability stack — all wired together and ready to adopt.
 
 See [`next-eda-boilerplate`](https://github.com/anjalee-cooray/next-eda-boilerplate) for the frontend counterpart and [`terraform-eda-boilerplate`](https://github.com/anjalee-cooray/terraform-eda-boilerplate) for cloud infrastructure.
 
@@ -16,8 +16,10 @@ See [`next-eda-boilerplate`](https://github.com/anjalee-cooray/next-eda-boilerpl
 | **Async messaging** | Transactional Outbox pattern; pluggable Kafka or SNS/SQS |
 | **Data consistency** | Idempotent consumers via inbox deduplication table |
 | **Architecture** | CQRS (separate command + query services), event choreography pattern |
+| **HTTP idempotency** | `Idempotency-Key` header enforced at gateway; deduplication via Redis (24h TTL) |
+| **Resilience** | Circuit breaker + retry (Resilience4j) on gateway routes and Stripe; correct decorator order |
 | **Auth** | OIDC JWT — Okta by default, any OIDC-compliant provider via one env var |
-| **Payments** | `PaymentGateway` interface, Stripe implementation |
+| **Payments** | `PaymentGateway` interface, Stripe implementation with idempotency keys |
 | **Observability** | OTel traces → Tempo, structured logs → Loki, metrics → Prometheus, Grafana dashboards |
 | **CI/CD** | GitHub Actions: Checkstyle, unit tests, integration tests (Testcontainers), GHCR image build, rolling deploy with smoke tests and rollback |
 | **Build** | Gradle multi-module monorepo, `buildSrc` conventions |
@@ -28,7 +30,7 @@ See [`next-eda-boilerplate`](https://github.com/anjalee-cooray/next-eda-boilerpl
 
 ```
                         ┌────────────┐
-   Browser / Client ──► │ api-gateway │ (JWT validation, rate limiting, routing)
+   Browser / Client ──► │ api-gateway │ (JWT validation, idempotency, circuit breaker, routing)
                         └──────┬─────┘
                                │ HTTP
                ┌───────────────┴───────────────┐
@@ -73,12 +75,13 @@ spring-eda-boilerplate/
 │   ├── shared-telemetry/      # OTel, Micrometer, virtual thread metrics
 │   ├── shared-security/       # TenantContext, OIDC JWT filter, roles
 │   ├── shared-db/             # RLS interceptor, OutboxWriter, InboxDeduplicator
-│   ├── shared-events/         # EventEnvelope, EventPublisher, Kafka + SNS/SQS
-│   └── shared-payments/       # PaymentGateway interface, Stripe implementation
+│   ├── shared-events/         # EventEnvelope, EventPublisher, Kafka + SNS/SQS, NoOpEventPublisher
+│   ├── shared-payments/       # PaymentGateway interface, Stripe + idempotency keys
+│   └── shared-resilience/     # Circuit breaker + retry auto-config, Micrometer metrics
 ├── services/
 │   ├── db-migrations/         # Flyway migrations only — exits after running
-│   ├── api-gateway/           # Spring Cloud Gateway + JWT + tenant propagation
-│   ├── example-command-service/  # Command handling, outbox write, saga skeleton
+│   ├── api-gateway/           # Spring Cloud Gateway, JWT, idempotency filter, circuit breaker
+│   ├── example-command-service/  # Command handling, outbox write, event choreography
 │   ├── example-query-service/    # CQRS read model, event projections
 │   ├── example-consumer-service/ # Idempotent event consumer
 │   └── outbox-relay/          # Outbox poller — publishes PENDING events to broker
@@ -87,7 +90,8 @@ spring-eda-boilerplate/
 ├── docker-compose.yml
 ├── Makefile
 ├── .env.example
-├── BOILERPLATE_SPEC.md        # Full architecture reference
+├── ARCHITECTURE.md            # Full system deep dive — request flows, patterns, verification
+├── BOILERPLATE_SPEC.md        # Pattern reference and adoption guide
 └── .github/
     ├── workflows/
     │   ├── pr-pipeline.yml    # Checkstyle → tests → build images on PR
@@ -148,11 +152,22 @@ The mock OIDC server issues tokens with `tenant_id: tenant-1` and `roles: [TENAN
 ### Test the happy path
 
 ```bash
-# Create an entity
+# Create an entity — Idempotency-Key required for all POST/PUT/DELETE
+IDEM_KEY=$(uuidgen)
+
 curl -s -X POST http://localhost:9080/api/commands/examples \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEM_KEY" \
   -d '{"name": "hello"}' | jq
+
+# Retry with the same key — returns cached response, no duplicate created
+curl -s -X POST http://localhost:9080/api/commands/examples \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEM_KEY" \
+  -d '{"name": "hello"}' | jq
+# Response header: Idempotency-Status: HIT
 
 # Query the read model (allow a second for projection)
 curl -s http://localhost:9080/api/queries/examples \
@@ -295,7 +310,7 @@ See [`.github/SECRETS.md`](.github/SECRETS.md) for required GitHub Secrets.
 6. Replace the `echo` stubs in the deploy pipeline with your ECS / Kubernetes deploy commands
 7. Optionally publish `shared-*` modules to a private Maven registry if teams split into separate repos
 
-Full architecture deep dive (request flows, RLS, observability, local verification): [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Full architecture deep dive (request flows, RLS, idempotency, resilience, observability, local verification): [`ARCHITECTURE.md`](ARCHITECTURE.md).
 Full pattern reference: [`BOILERPLATE_SPEC.md`](BOILERPLATE_SPEC.md).
 
 ---
@@ -310,9 +325,10 @@ Full pattern reference: [`BOILERPLATE_SPEC.md`](BOILERPLATE_SPEC.md).
 | Auth | Spring Security OAuth2 Resource Server (OIDC) |
 | Database | PostgreSQL 16 with RLS |
 | Migrations | Flyway |
-| Cache | Redis 7 |
+| Cache | Redis 7 (rate limiting + idempotency deduplication) |
 | Messaging | Kafka (KRaft) or AWS SNS+SQS |
-| Payments | Stripe (via `PaymentGateway` interface) |
+| Payments | Stripe (via `PaymentGateway` interface, idempotency keys) |
+| Resilience | Resilience4j — circuit breaker + retry, Micrometer metrics |
 | Traces | OpenTelemetry Java agent → Grafana Tempo |
 | Logs | Logback + Loki4j → Grafana Loki |
 | Metrics | Micrometer → Prometheus → Grafana |

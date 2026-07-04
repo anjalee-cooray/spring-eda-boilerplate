@@ -18,7 +18,7 @@ Event-Driven Microservices with CQRS. Synchronous flows use HTTP (JWT-authentica
 
 | Service | Port | Responsibility |
 |---|---|---|
-| `api-gateway` | 9080 | JWT validation, tenant context propagation, rate limiting, request routing |
+| `api-gateway` | 9080 | JWT validation, tenant context propagation, HTTP idempotency, circuit breaker + retry, request routing |
 | `example-command-service` | 8081 | Command handling, domain writes, event choreography, outbox writes |
 | `example-query-service` | 8082 | CQRS read model, event projection, query endpoints |
 | `example-consumer-service` | 8083 | Idempotent event consumer — pattern for notification/billing/audit services |
@@ -34,8 +34,8 @@ Event-Driven Microservices with CQRS. Synchronous flows use HTTP (JWT-authentica
 | `shared-security` | OIDC JWT filter, `TenantContext`, `TenantContextHolder`, role constants |
 | `shared-db` | RLS `SET LOCAL` interceptor, `OutboxWriter`, `InboxDeduplicator`, JPA base entities |
 | `shared-events` | `EventEnvelope` record, `EventPublisher` interface, Kafka + SNS/SQS implementations |
-| `shared-payments` | `PaymentGateway` interface, Stripe implementation, webhook verifier |
-| `shared-resilience` | Resilience4j circuit breaker auto-config, Micrometer metrics bridge, default configs |
+| `shared-payments` | `PaymentGateway` interface, Stripe implementation with circuit breaker + retry + Stripe idempotency keys, webhook verifier |
+| `shared-resilience` | Resilience4j circuit breaker + retry auto-config, default and `external-api` configs, exponential backoff, Micrometer metrics bridge |
 
 ---
 
@@ -107,6 +107,39 @@ Use choreography by default. Upgrade to orchestration when you need to track sag
 ### Virtual Threads
 
 Project Loom is enabled globally via `--enable-preview` in all Dockerfiles and Gradle config. Every service benefits from virtual threads for I/O-bound workloads without any code changes.
+
+### Circuit Breaker + Retry
+
+`shared-resilience` provides Resilience4j auto-configuration used in two places:
+
+**API Gateway** — Spring Cloud Gateway circuit breaker filter wraps both `command-service` and `query-service` routes. If a downstream service is unavailable, the gateway returns a 503 from `FallbackController` with a `Retry-After` header. The query-service route also has a retry filter (3 attempts, 500ms→1s→2s exponential backoff, GET-only). Command routes are intentionally **not retried** at the gateway — POST/PUT/DELETE are not safe to retry without idempotency keys; clients retry using the same `Idempotency-Key` header instead.
+
+**StripePaymentGateway** — circuit breaker + retry wrap every Stripe API call. The decorator order is:
+
+```
+CircuitBreaker (outermost) → Retry (innermost) → Stripe API call
+```
+
+The circuit breaker evaluates the final outcome after all retry attempts are exhausted. A transient failure that succeeds on retry does not count toward the circuit breaker failure threshold. Only network-level exceptions (`IOException`, `ConnectException`, `TimeoutException`) trigger retries — business errors (`PaymentException` wrapping `StripeException`) are not retried because a declined card will not succeed on a second attempt.
+
+When the circuit breaker opens, `StripePaymentGateway` throws `PaymentException("Payment service temporarily unavailable — please retry later")`.
+
+### HTTP Idempotency
+
+`IdempotencyFilter` in the API gateway enforces idempotency on all mutating command routes (`POST`, `PUT`, `PATCH`, `DELETE` on `/api/commands/**`).
+
+**Behaviour:**
+- Missing `Idempotency-Key` header → 400 Bad Request
+- Cache hit (key seen before, response ready) → return cached response with `Idempotency-Status: HIT`
+- Cache miss → forward request normally → cache response (24h TTL)
+- Concurrent duplicate (request in flight) → 409 Conflict
+- 5xx responses → **not cached**, allowing the client to retry after server recovery
+
+**Cache key format:** `idempotency:{tenant_id}:{idempotency_key}` — scoped per tenant to prevent cross-tenant key collisions.
+
+**Redis operations:** SETNX sets a `processing` marker (30s TTL) when a request first arrives. After the response comes back, the full response is stored with a 24h TTL and the marker is replaced. Concurrent requests that find the `processing` marker receive a 409.
+
+**Stripe idempotency keys** — `PaymentRequest` and `RefundRequest` carry an `idempotencyKey` field. `StripePaymentGateway` passes this to Stripe via `RequestOptions`. If a payment or refund request is retried after a network failure, Stripe returns the original result without charging the card again.
 
 ---
 
@@ -238,6 +271,10 @@ All requests pass through the API gateway which validates JWTs against the OIDC 
 ### Tenant Context Propagation
 
 The gateway extracts `tenant_id` from the JWT and forwards it as `X-Tenant-Id`. Downstream services read it via `TenantContextFilter` into `TenantContextHolder` (ThreadLocal). `RlsDataSourceInterceptor` then sets `app.tenant_id` on the DB connection before every query.
+
+### Idempotency Enforcement
+
+`IdempotencyFilter` runs after JWT validation and tenant context extraction. It requires an `Idempotency-Key` header on all mutating command requests. The key is scoped to the tenant — the same string used by two different tenants creates independent cache entries. The `/fallback/**` endpoints are public (no JWT required) because they serve circuit breaker error responses.
 
 ### Actuator Endpoints
 
@@ -388,7 +425,7 @@ When you have enough event-driven side effects to justify a separate deployment,
 ## What This Boilerplate Does Not Include
 
 - API versioning strategy
-- Rate limiting implementation (stub exists in gateway `application.yml`)
+- Rate limiting (circuit breaker protects downstream services but per-client rate limiting is not implemented)
 - Tenant provisioning flow (tenants table exists, provisioning logic is your domain)
 - Email / notification service
 - File storage service
