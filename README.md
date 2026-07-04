@@ -15,7 +15,7 @@ See [`next-eda-boilerplate`](https://github.com/anjalee-cooray/next-eda-boilerpl
 | **Multi-tenancy** | PostgreSQL Row-Level Security, `SET LOCAL app.tenant_id` per request |
 | **Async messaging** | Transactional Outbox pattern; pluggable Kafka or SNS/SQS |
 | **Data consistency** | Idempotent consumers via inbox deduplication table |
-| **Architecture** | CQRS (separate command + query services), Saga orchestration skeleton |
+| **Architecture** | CQRS (separate command + query services), event choreography pattern |
 | **Auth** | OIDC JWT — Okta by default, any OIDC-compliant provider via one env var |
 | **Payments** | `PaymentGateway` interface, Stripe implementation |
 | **Observability** | OTel traces → Tempo, structured logs → Loki, metrics → Prometheus, Grafana dashboards |
@@ -27,26 +27,35 @@ See [`next-eda-boilerplate`](https://github.com/anjalee-cooray/next-eda-boilerpl
 ## Architecture
 
 ```
-                        ┌───────────┐
-   Browser / Client ──► │ api-gateway│ (JWT validation, rate limiting, routing)
-                        └─────┬─────┘
-                              │ HTTP
-          ┌───────────────────┼───────────────────┐
-          ▼                   ▼                   ▼
-  ┌───────────────┐  ┌────────────────┐  ┌────────────────┐
-  │ command-service│  │  query-service │  │consumer-service│
-  │   (writes,    │  │  (read model,  │  │  (idempotent   │
-  │   outbox)     │  │   projections) │  │   reactions)   │
-  └───────┬───────┘  └────────────────┘  └────────────────┘
-          │ outbox_records (PENDING)
-          ▼
-  ┌───────────────┐     ┌─────────────────────────┐
-  │ outbox-relay  │────►│ Kafka / SNS+SQS          │
-  └───────────────┘     └─────────────────────────┘
-          │
-  ┌───────────────┐
-  │ db-migrations │  (short-lived Flyway job)
-  └───────────────┘
+                        ┌────────────┐
+   Browser / Client ──► │ api-gateway │ (JWT validation, rate limiting, routing)
+                        └──────┬─────┘
+                               │ HTTP
+               ┌───────────────┴───────────────┐
+               ▼                               ▼
+  ┌────────────────────┐           ┌────────────────────┐
+  │  command-service   │           │   query-service     │
+  │  CQRS write side   │           │   CQRS read side    │
+  │  (domain writes,   │           │   (read model,      │
+  │   outbox)          │           │    projections)     │
+  └────────┬───────────┘           └──────────┬─────────┘
+           │ outbox_records                    │ subscribes
+           ▼                                  │
+  ┌────────────────┐     ┌───────────────────────────────┐
+  │  outbox-relay  │────►│      Kafka / SNS+SQS           │
+  └────────────────┘     └───────────────────────────────┘
+                                               │ subscribes
+                                               ▼
+                                  ┌────────────────────────┐
+                                  │   consumer-service      │
+                                  │   Event-Driven Pub/Sub  │
+                                  │   (notifications,       │
+                                  │    billing, audit, etc) │
+                                  └────────────────────────┘
+
+  ┌────────────────┐
+  │  db-migrations │  short-lived Flyway job — runs before services start
+  └────────────────┘
 ```
 
 ---
@@ -161,21 +170,6 @@ curl -s http://localhost:9080/api/queries/examples \
 
 ---
 
-## Makefile targets
-
-| Target | What it does |
-|---|---|
-| `make infra` | Start infrastructure services only (Postgres, Redis, Kafka, observability, OIDC) |
-| `make up` | Start the full stack |
-| `make build` | Build all JARs + Docker images |
-| `make migrate` | Run `db-migrations` against the local database |
-| `make logs` | Tail all service logs |
-| `make ps` | Show service status |
-| `make down` | Stop all containers |
-| `make clean` | Stop containers and remove volumes |
-
----
-
 ## Incremental adoption — start with command service only
 
 You don't need to run all services from day one. A common growth path:
@@ -197,7 +191,22 @@ Add GET endpoints directly to the command controller to read data. No query serv
 
 **Stage 3** — Add `example-query-service` when read shape diverges from write model.
 
-**Stage 4** — Add `example-consumer-service` when side effects grow enough to deserve their own service.
+**Stage 4** — Add `example-consumer-service` (rename it `notification-service`, `billing-service`, etc.) when side effects grow enough to deserve their own deployment.
+
+---
+
+## Makefile targets
+
+| Target | What it does |
+|---|---|
+| `make infra` | Start infrastructure services only (Postgres, Redis, Kafka, observability, OIDC) |
+| `make up` | Start the full stack |
+| `make build` | Build all JARs + Docker images |
+| `make migrate` | Run `db-migrations` against the local database |
+| `make logs` | Tail all service logs |
+| `make ps` | Show service status |
+| `make down` | Stop all containers |
+| `make clean` | Stop containers and remove volumes |
 
 ---
 

@@ -16,10 +16,10 @@ Event-Driven Microservices with CQRS. Synchronous flows use HTTP (JWT-authentica
 
 | Service | Port | Responsibility |
 |---|---|---|
-| `api-gateway` | 8080 | JWT validation, tenant context propagation, rate limiting, request routing |
-| `example-command-service` | 8081 | Command handling, domain writes, saga orchestration, outbox writes |
+| `api-gateway` | 9080 | JWT validation, tenant context propagation, rate limiting, request routing |
+| `example-command-service` | 8081 | Command handling, domain writes, event choreography, outbox writes |
 | `example-query-service` | 8082 | CQRS read model, event projection, query endpoints |
-| `example-consumer-service` | 8083 | Idempotent event handling, business reactions |
+| `example-consumer-service` | 8083 | Idempotent event consumer — pattern for notification/billing/audit services |
 | `outbox-relay` | 8084 | Polls `outbox_records`, publishes events to the broker |
 | `db-migrations` | — | Short-lived Flyway job — runs before any service deploys |
 
@@ -68,11 +68,38 @@ Before processing an event, consumers call `InboxDeduplicator.isDuplicate(eventI
 
 ### CQRS
 
+CQRS covers only two services — command and query. The consumer service is **not** part of CQRS; it is a separate event-driven pub/sub pattern.
+
+| Service | Pattern | Purpose |
+|---|---|---|
+| `example-command-service` | CQRS — command side | Domain writes, business rules, event publishing |
+| `example-query-service` | CQRS — query side | Read model projections, query endpoints |
+| `example-consumer-service` | Event-Driven Pub/Sub | Side effects — the pattern for notification, billing, audit services |
+
 Command and query services never share a database connection. The command service writes to `example_entities`. The query service maintains `example_read_models` by consuming domain events from the broker and projecting them via `ExampleProjector`. Query endpoints read only from the read model.
 
-### Saga Skeleton
+### Event Choreography
 
-`ExampleSaga` in the command service provides orchestration hooks (`onExampleCreated`, `onExampleActivated`, `compensate`). Wire these to your multi-step business flows. The saga publishes command events to trigger downstream steps and compensating events on failure.
+`ExampleChoreographyHandler` in the command service demonstrates event choreography — it implements `EventConsumer`, subscribes to `example.created`, activates the entity, and publishes `example.activated`. No central coordinator; each service reacts to events and produces the next one.
+
+```
+command-service publishes "example.created"
+  └─ ExampleChoreographyHandler receives it → activates entity → publishes "example.activated"
+     └─ query-service projects it → updates read model
+     └─ notification-service sends confirmation email
+```
+
+**Choreography vs Orchestration:**
+
+| | Choreography (this boilerplate) | Orchestration |
+|---|---|---|
+| Coordinator | None — services react independently | Central saga class tracks each step |
+| State tracking | No saga state needed | Requires `saga_instances` DB table |
+| Coupling | Services only know about events | Orchestrator knows all participants |
+| Best for | Linear flows, loose coupling | Complex flows with branching, retries, compensation across many services |
+| Frameworks | None needed | Axon, Conductor, Temporal |
+
+Use choreography by default. Upgrade to orchestration when you need to track saga state across many services, handle partial failures with compensation, or manage branching flows that choreography cannot express cleanly.
 
 ### Virtual Threads
 
