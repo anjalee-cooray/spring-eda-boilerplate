@@ -295,7 +295,8 @@ See [`.github/SECRETS.md`](.github/SECRETS.md) for required GitHub Secrets.
 6. Replace the `echo` stubs in the deploy pipeline with your ECS / Kubernetes deploy commands
 7. Optionally publish `shared-*` modules to a private Maven registry if teams split into separate repos
 
-Full architecture reference and pattern explanations: [`BOILERPLATE_SPEC.md`](BOILERPLATE_SPEC.md).
+Full architecture deep dive (request flows, RLS, observability, local verification): [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Full pattern reference: [`BOILERPLATE_SPEC.md`](BOILERPLATE_SPEC.md).
 
 ---
 

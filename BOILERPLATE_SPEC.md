@@ -4,6 +4,8 @@
 
 A production-ready Spring Boot microservices boilerplate for building multi-tenant, event-driven SaaS applications on Java 25. All core architectural decisions are pre-made and wired together. Everything external is pluggable behind interfaces.
 
+For a full end-to-end walkthrough — request flows, RLS mechanics, event envelope details, observability wiring, and local verification steps — see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ---
 
 ## Architecture
