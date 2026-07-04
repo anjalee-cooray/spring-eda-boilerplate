@@ -176,6 +176,31 @@ curl -s http://localhost:9080/api/queries/examples \
 
 ---
 
+## Incremental adoption — start with command service only
+
+You don't need to run all services from day one. A common growth path:
+
+**Stage 1 — Command service only**
+
+```bash
+# Minimal infrastructure — no Kafka, no relay, no query service
+docker compose up postgres redis mock-oidc prometheus grafana
+
+./gradlew :services:example-command-service:bootRun
+```
+
+Don't set `app.events.broker` — `NoOpEventPublisher` activates automatically and logs events instead of publishing them. Outbox records accumulate as `PENDING` and are harmless.
+
+Add GET endpoints directly to the command controller to read data. No query service, no eventual consistency to reason about.
+
+**Stage 2** — Add `kafka` + `outbox-relay` when you need async side effects.
+
+**Stage 3** — Add `example-query-service` when read shape diverges from write model.
+
+**Stage 4** — Add `example-consumer-service` when side effects grow enough to deserve their own service.
+
+---
+
 ## Pluggable points
 
 ### Auth provider

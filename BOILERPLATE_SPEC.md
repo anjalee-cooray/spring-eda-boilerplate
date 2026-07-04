@@ -296,6 +296,53 @@ curl -s -X POST http://localhost:8090/okta/token \
 
 ---
 
+## Incremental Adoption
+
+You do not need to run all services from day one. The services are independent — start with only what you need and introduce the rest as the product grows.
+
+### Stage 1 — Command service only
+
+Run only the command service. Add GET endpoints directly to it so you can read data without a query service. The outbox relay and broker are not needed yet — `NoOpEventPublisher` activates automatically when no broker is configured, logging events instead of publishing them. Outbox records accumulate as `PENDING` and are harmless.
+
+```bash
+# Minimal infrastructure
+docker compose up postgres redis mock-oidc grafana prometheus
+
+# Run the command service
+./gradlew :services:example-command-service:bootRun
+```
+
+Add reads to the command controller:
+
+```java
+@GetMapping("/commands/examples/{id}")
+public ResponseEntity<ExampleEntity> get(@PathVariable UUID id) {
+    return repository.findById(id)
+        .map(ResponseEntity::ok)
+        .orElse(ResponseEntity.notFound().build());
+}
+```
+
+### Stage 2 — Add async messaging
+
+When you need background reactions to events (emails, webhooks, side effects), add Kafka and the outbox relay:
+
+```bash
+docker compose up kafka outbox-relay
+```
+
+Set `app.events.broker: kafka` in the command service. The relay will drain the accumulated `PENDING` outbox records on startup.
+
+### Stage 3 — Add CQRS read model
+
+When your read requirements diverge from the write model — different shape, heavy aggregation, or independent scaling — introduce the query service and write projections.
+
+### Stage 4 — Add dedicated consumer service
+
+When you have enough event-driven side effects to justify a separate deployment, move handlers out of the query service into a dedicated consumer service.
+
+---
+
 ## Adopting This Boilerplate
 
 1. **Rename packages** — replace `com.example.eda` with your group ID
