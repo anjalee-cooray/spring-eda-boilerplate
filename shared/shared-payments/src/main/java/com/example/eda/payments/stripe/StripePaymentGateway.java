@@ -14,6 +14,7 @@ import com.stripe.param.PaymentIntentConfirmParams;
 import com.stripe.param.PaymentIntentCreateParams;
 import com.stripe.param.PaymentIntentRetrieveParams;
 import com.stripe.param.RefundCreateParams;
+import com.stripe.net.RequestOptions;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
@@ -110,7 +111,10 @@ public class StripePaymentGateway implements PaymentGateway {
                     .setDescription(request.description())
                     .putAllMetadata(request.metadata())
                     .build();
-            PaymentIntent intent = PaymentIntent.create(params);
+            // Idempotency key passed to Stripe — if this request is retried after a
+            // network failure, Stripe returns the original result without charging again.
+            RequestOptions options = requestOptions(request.idempotencyKey());
+            PaymentIntent intent = PaymentIntent.create(params, options);
             log.debug("Created PaymentIntent id={} status={}", intent.getId(), intent.getStatus());
             return toResult(intent);
         } catch (StripeException e) {
@@ -121,6 +125,8 @@ public class StripePaymentGateway implements PaymentGateway {
     private PaymentResult doConfirmPayment(String paymentIntentId) {
         try {
             PaymentIntent intent = PaymentIntent.retrieve(paymentIntentId);
+            // confirmPayment is keyed on paymentIntentId itself — Stripe deduplicates
+            // confirm calls for the same intent automatically.
             intent = intent.confirm(PaymentIntentConfirmParams.builder().build());
             log.debug("Confirmed PaymentIntent id={} status={}", intent.getId(), intent.getStatus());
             return toResult(intent);
@@ -136,7 +142,9 @@ public class StripePaymentGateway implements PaymentGateway {
                     .setAmount(request.amountInCents())
                     .setReason(RefundCreateParams.Reason.valueOf(request.reason()))
                     .build();
-            Refund refund = Refund.create(params);
+            // Idempotency key prevents double-refund if the response is lost in transit.
+            RequestOptions options = requestOptions(request.idempotencyKey());
+            Refund refund = Refund.create(params, options);
             log.debug("Created Refund id={} status={}", refund.getId(), refund.getStatus());
             return toRefundResult(refund, request.paymentIntentId());
         } catch (StripeException e) {
@@ -152,6 +160,14 @@ public class StripePaymentGateway implements PaymentGateway {
         } catch (StripeException e) {
             throw new PaymentException("Failed to retrieve PaymentIntent", paymentIntentId, e);
         }
+    }
+
+    private RequestOptions requestOptions(String idempotencyKey) {
+        RequestOptions.RequestOptionsBuilder builder = RequestOptions.builder();
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            builder.setIdempotencyKey(idempotencyKey);
+        }
+        return builder.build();
     }
 
     private PaymentResult toResult(PaymentIntent intent) {
