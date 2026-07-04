@@ -18,7 +18,8 @@ public class GatewaySecurityConfig {
                     .pathMatchers(
                         "/actuator/health",
                         "/actuator/info",
-                        "/actuator/prometheus"
+                        "/actuator/prometheus",
+                        "/fallback/**"   // internal circuit breaker fallback routes
                     ).permitAll()
                     .anyExchange().authenticated()
                 )

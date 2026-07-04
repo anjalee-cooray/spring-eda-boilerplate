@@ -11,6 +11,10 @@ spring:
   cloud:
     gateway:
       routes:
+        # ── Command routes ──────────────────────────────────────────────────
+        # POST/PUT/DELETE only. No Retry filter — commands are not idempotent
+        # at the gateway level. Clients must retry with the same Idempotency-Key.
+        # The IdempotencyFilter handles deduplication via Redis.
         - id: command-service
           uri: ${COMMAND_SERVICE_URL:http://localhost:8081}
           predicates:
@@ -22,12 +26,25 @@ spring:
                 name: command-service
                 fallbackUri: forward:/fallback/command-service
 
+        # ── Query routes ────────────────────────────────────────────────────
+        # GET only. Safe to retry — GET is idempotent by definition.
+        # Retry runs inside the circuit breaker: CB sees final outcome after retries.
         - id: query-service
           uri: ${QUERY_SERVICE_URL:http://localhost:8082}
           predicates:
             - Path=/api/queries/**
           filters:
             - StripPrefix=1
+            - name: Retry
+              args:
+                retries: 3
+                statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE,GATEWAY_TIMEOUT
+                methods: GET
+                backoff:
+                  firstBackoff: 500ms
+                  maxBackoff: 2000ms
+                  factor: 2
+                  basedOnPreviousValue: false
             - name: CircuitBreaker
               args:
                 name: query-service
@@ -57,8 +74,12 @@ logging:
   loki:
     url: ${LOGGING_LOKI_URL:http://localhost:3100}
 
+# Idempotency cache TTL (seconds) — how long a response is cached in Redis
+app:
+  idempotency:
+    ttl-hours: 24
+
 # Circuit breaker config for gateway routes
-# shared-resilience provides the base defaults — override per instance here if needed
 resilience4j:
   circuitbreaker:
     instances:

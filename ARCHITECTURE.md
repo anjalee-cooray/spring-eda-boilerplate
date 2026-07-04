@@ -165,6 +165,78 @@ Use choreography by default. Upgrade to orchestration when flows branch signific
 
 ---
 
+### Idempotency — Safe Retries on Commands
+
+Implemented in `IdempotencyFilter` (api-gateway). Prevents duplicate processing when a client retries a command that already succeeded but whose response was lost in transit.
+
+**Why the gateway, not the command service:**
+One implementation in the gateway covers all current and future command services. The gateway already has Redis wired for rate limiting — idempotency caching uses the same instance.
+
+**Flow:**
+
+```
+Client generates one UUID per user action (not per retry attempt)
+
+POST /api/commands/appointments
+  Idempotency-Key: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+
+IdempotencyFilter:
+  cacheKey = "idempotency:tenant-1:7c9e6679-..."
+
+  Redis HIT?
+    → return cached {statusCode, body} immediately
+    → response header: Idempotency-Status: HIT
+    → command-service never called
+
+  Redis MISS?
+    → SETNX "idempotency:tenant-1:...:processing" (30s TTL)
+       blocks a second concurrent request with the same key
+    → forward to command-service
+    → on response: cache {statusCode, body} in Redis (24h TTL)
+    → delete processing marker
+    → return response to client
+    → response header: Idempotency-Status: MISS
+
+  Concurrent duplicate (processing marker exists)?
+    → return 409 Conflict immediately
+    → client should wait briefly and retry
+```
+
+**Cache key scope:**
+
+```
+"idempotency:{tenant_id}:{idempotency_key}"
+```
+
+Scoped by `tenant_id` so keys from different tenants never collide. `tenant_id` is read from the `X-Tenant-Id` header already set by `TenantContextGatewayFilter`.
+
+**What is and is not cached:**
+
+| Response | Cached? | Reason |
+|---|---|---|
+| 2xx | Yes | Command succeeded — safe to replay |
+| 4xx | Yes | Client error — same error on retry is correct |
+| 5xx | No | Server error — command may not have run; allow retry to reach server |
+
+**Retry contract for clients:**
+
+```
+1. Generate UUID once per user action
+2. Send with every attempt: Idempotency-Key: <uuid>
+3. On 503 (circuit open) or timeout → retry with SAME uuid
+4. On 409 (concurrent duplicate) → wait 1s → retry with SAME uuid
+5. On 2xx or 4xx → stop retrying
+```
+
+**Missing header policy:**
+`POST`/`PUT`/`PATCH`/`DELETE` without `Idempotency-Key` → `400 Bad Request`.
+`GET` requests skip the filter entirely — they are inherently idempotent.
+
+**Retry on query routes (GET only):**
+Query routes have a `Retry` filter (3 attempts, exponential backoff 500ms → 1s → 2s) because GET is safe to retry at any layer. Command routes intentionally have no gateway-level retry — the client retries with the idempotency key instead.
+
+---
+
 ### Circuit Breaker + Retry — Resilience
 
 Implemented in `shared-resilience`, applied to all synchronous calls that can fail or hang. Async event flows (outbox → Kafka) do not need these patterns — the outbox handles broker failures and Kafka handles consumer failures.
