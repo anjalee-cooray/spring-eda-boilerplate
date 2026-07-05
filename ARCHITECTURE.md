@@ -132,6 +132,91 @@ Consumer receives event:
 
 ---
 
+### Dead Letter Queue (DLQ)
+
+Kafka delivers events at least once, but some messages will fail processing permanently — a malformed payload, a missing dependency, or a code bug. Without a DLQ, the consumer would either:
+- Block forever on the poison message (auto-offset-commit disabled)
+- Skip it silently and lose the event
+
+The DLQ pattern gives a third option: **retry a fixed number of times, then park the message for operator inspection**.
+
+#### Retry policy
+
+`KafkaConsumerConfig` (in `shared-events`) registers a `DefaultErrorHandler` on the `ConcurrentKafkaListenerContainerFactory`:
+
+```
+Attempt 1  →  fails  →  wait 1s
+Attempt 2  →  fails  →  wait 2s
+Attempt 3  →  fails  →  wait 4s
+After attempt 3 → route to {original-topic}.dlq
+```
+
+Total elapsed before DLQ: ~7 seconds. Non-retryable exceptions (`IllegalArgumentException`, `IllegalStateException`) skip retries and go directly to the DLQ — retrying a malformed payload will never succeed.
+
+#### DLQ topic naming
+
+```
+example.created  →  example.created.dlq
+```
+
+Every topic the service consumes has a paired DLQ topic. The `DeadLetterPublishingRecoverer` routes to `{original-topic}.dlq` automatically. Kafka auto-creates the DLQ topic on first write (in local dev); in production, pre-create it with the same partition count as the source topic.
+
+#### DLQ message headers
+
+Spring Kafka's `DeadLetterPublishingRecoverer` adds these headers to every DLQ message:
+
+| Header | Content |
+|---|---|
+| `kafka_dlt-original-topic` | Source topic name |
+| `kafka_dlt-original-partition` | Source partition number |
+| `kafka_dlt-original-offset` | Source message offset |
+| `kafka_dlt-exception-message` | Exception message |
+| `kafka_dlt-exception-fqcn` | Exception class name |
+
+These headers are logged by `DlqConsumer` and are the primary tool for operator triage.
+
+#### DlqConsumer
+
+`DlqConsumer` in `example-consumer-service` listens on `app.events.kafka.dlq-topics` with a separate consumer group (`{service-name}-dlq`):
+
+```
+DLQ message arrives
+  → log at ERROR with all DLT headers + payload
+  → increment events.dlq.received{topic=example.created.dlq}
+  → return (do NOT re-throw — re-throwing loops back to DLQ)
+```
+
+The Micrometer counter drives a Prometheus alert:
+
+```promql
+rate(events_dlq_received_total[5m]) > 0
+```
+
+Alert severity: **P1** — every DLQ message means a business event was not processed.
+
+#### Operator runbook
+
+1. Check service logs for `DLQ event received` — `sourceTopic`, `sourcePartition`, `sourceOffset`, and `exceptionMessage` identify the exact failure
+2. Inspect the payload in the log to determine whether it is a code bug or bad data
+
+**Code bug** → fix the handler, redeploy, then replay the DLQ:
+```bash
+kafka-consumer-groups --bootstrap-server localhost:9092 \
+  --group example-consumer-service-dlq \
+  --topic example.created.dlq \
+  --reset-offsets --to-earliest --execute
+```
+
+**Bad data (poison message)** → advance past it:
+```bash
+kafka-consumer-groups --bootstrap-server localhost:9092 \
+  --group example-consumer-service-dlq \
+  --topic example.created.dlq \
+  --reset-offsets --to-latest --execute
+```
+
+---
+
 ### Event Choreography
 
 Choreography is how services react to each other without a central coordinator. Each service listens for events it cares about and publishes new events as a result.

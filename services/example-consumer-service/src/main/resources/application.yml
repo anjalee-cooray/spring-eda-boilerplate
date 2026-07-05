@@ -22,12 +22,20 @@ spring:
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    # Producer config required by DeadLetterPublishingRecoverer to write failed
+    # messages to the DLQ topic after all retry attempts are exhausted.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
 
 app:
   events:
     broker: ${EVENTS_BROKER:kafka}
     kafka:
       topics: ${KAFKA_TOPICS:example.created}
+      # DLQ topic naming convention: {original-topic}.dlq
+      # Add one entry per topic this service consumes.
+      dlq-topics: ${KAFKA_DLQ_TOPICS:example.created.dlq}
 
 server:
   port: ${PORT:8083}
