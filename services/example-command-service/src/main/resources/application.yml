@@ -2,6 +2,12 @@ spring:
   application:
     name: example-command-service
 
+  # Fetch config from config-service on startup.
+  # optional: means the service starts with local defaults if config-service is unreachable.
+  # Remove 'optional:' in production to fail fast when config is unavailable.
+  config:
+    import: optional:configserver:${CONFIG_SERVER_URI:http://localhost:8888}
+
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/edadb}
     username: ${DB_USERNAME:postgres}
