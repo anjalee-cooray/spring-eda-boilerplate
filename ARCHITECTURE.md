@@ -1162,6 +1162,89 @@ make sns-setup        # create topics, queues, DLQs, subscription
 
 ---
 
+## Consumer Health Monitoring
+
+Without visibility into consumer processing, a lagging or stuck consumer can go undetected for hours. This section documents the two layers of monitoring added for consumers.
+
+### Layer 1 — Per-handler offset tracking (database)
+
+`ConsumerHealthTracker.recordSuccess()` is called at the end of each successful `handle()` call. It writes to the `consumer_offsets` table in the same transaction as the business logic, so the offset is only advanced when processing actually succeeded.
+
+```
+consumer_offsets (consumer_name, event_type, tenant_id) →
+    last_event_id    UUID
+    last_event_at    TIMESTAMPTZ
+    events_processed BIGINT
+    last_error       TEXT
+    last_error_at    TIMESTAMPTZ
+```
+
+**Health endpoint** — `GET /actuator/consumer-health`:
+```json
+[
+  {
+    "consumer": "ExampleCreatedHandler",
+    "eventType": "example.created",
+    "tenantId": "tenant-1",
+    "lastEventAt": "2025-01-15T10:30:00Z",
+    "lagSeconds": 4,
+    "eventsProcessed": 1247,
+    "lastError": "none"
+  }
+]
+```
+
+**Micrometer gauge** — `consumer.lag.seconds{consumer, event_type, tenant}`:
+Reports how many seconds ago the last event was processed. Registered lazily on first successful event per combination. Query in Prometheus:
+```promql
+consumer_lag_seconds{consumer="ExampleCreatedHandler"} > 300
+```
+Alert: consumer hasn't processed an event in 5 minutes.
+
+**Usage in handlers:**
+```java
+@Transactional
+public void handle(EventEnvelope envelope) {
+    if (deduplicator.isDuplicate(envelope.eventId())) return;
+    // ... business logic ...
+    deduplicator.markProcessed(envelope.eventId(), ...);
+    healthTracker.recordSuccess(getClass().getSimpleName(),
+            envelope.eventId(), envelope.eventType(), envelope.tenantId());
+}
+```
+
+### Layer 2 — Kafka consumer group lag (AdminClient)
+
+`KafkaConsumerLagMetrics` polls the Kafka AdminClient every 15 seconds (configurable via `app.kafka.lag-refresh-ms`) and exposes lag per partition as a gauge:
+
+```
+kafka.consumer.lag{group, topic, partition}
+```
+
+Lag = `latestOffset - committedOffset` per partition. A lag of 0 means the consumer is caught up. A growing lag means the consumer is processing slower than messages arrive.
+
+**Alert rule:**
+```promql
+kafka_consumer_lag{group="example-consumer-service"} > 1000
+```
+
+This component only activates when `app.events.broker=kafka`. For SNS/SQS, use the CloudWatch `ApproximateNumberOfMessagesVisible` metric on the SQS queue instead.
+
+### SNS/SQS equivalent
+
+For SNS/SQS consumers, the per-handler offset tracking (Layer 1) works identically — `ConsumerHealthTracker` is broker-agnostic. For queue depth lag, use:
+```
+CloudWatch → SQS → ApproximateNumberOfMessagesVisible
+```
+or query LocalStack for local dev:
+```bash
+aws --endpoint-url=http://localhost:4566 sqs get-queue-attributes \
+  --queue-url <url> \
+  --attribute-names ApproximateNumberOfMessages
+```
+
+---
+
 ## Event Store — Permanent Audit Log
 
 ### The gap in the pure outbox approach
@@ -1799,6 +1882,12 @@ Event replay re-publishes outbox records with their **original `schema_version`*
 | Grafana trace links to logs | OTel + Loki + Tempo wired correctly |
 | Invalid payload → SchemaValidationException | EventSchemaRegistry enforcing JSON Schema before publish |
 | Old event (v1) handled by v2 consumer | EventUpcasterRegistry chain normalised schema before dispatch |
+| GET /actuator/consumer-health → lagSeconds | ConsumerHealthTracker updated after every successful handle() |
+| consumer.lag.seconds gauge rising | Consumer is stuck or processing slower than publish rate |
+| kafka.consumer.lag{partition} > 0 | Kafka AdminClient lag metric wired and refreshing |
+| event_store has same rows as outbox | OutboxWriter writes both tables atomically |
+| findByAggregateId returns ordered events | Event sourcing query working via aggregate_id index |
+| Saga status = COMPENSATED after payment.failed | ExampleBookingSaga ran compensation step successfully |
 | Two relay instances, zero duplicate deliveries | SKIP LOCKED claim ensures disjoint batches per pod |
 | Kill relay mid-poll, record still delivered | ReclaimTask reset expired IN_FLIGHT to PENDING on restart |
 | outbox.records.failed gauge > 0 | Record exhausted all attempts — alert fires, operator resets |

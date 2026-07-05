@@ -60,11 +60,17 @@ app:
 server:
   port: ${PORT:8083}
 
+app:
+  kafka:
+    # How often KafkaConsumerLagMetrics refreshes lag from AdminClient.
+    # Keep this > Prometheus scrape interval (default 15s) to avoid stale reads.
+    lag-refresh-ms: ${KAFKA_LAG_REFRESH_MS:15000}
+
 management:
   endpoints:
     web:
       exposure:
-        include: health,info,prometheus
+        include: health,info,prometheus,consumer-health
   endpoint:
     health:
       show-details: always

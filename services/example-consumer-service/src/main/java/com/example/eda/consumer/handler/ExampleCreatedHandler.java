@@ -1,5 +1,6 @@
 package com.example.eda.consumer.handler;
 
+import com.example.eda.db.health.ConsumerHealthTracker;
 import com.example.eda.db.inbox.InboxDeduplicator;
 import com.example.eda.events.consumer.EventConsumer;
 import com.example.eda.events.envelope.EventEnvelope;
@@ -14,9 +15,11 @@ public class ExampleCreatedHandler implements EventConsumer {
     private static final Logger log = LoggerFactory.getLogger(ExampleCreatedHandler.class);
 
     private final InboxDeduplicator deduplicator;
+    private final ConsumerHealthTracker healthTracker;
 
-    public ExampleCreatedHandler(InboxDeduplicator deduplicator) {
+    public ExampleCreatedHandler(InboxDeduplicator deduplicator, ConsumerHealthTracker healthTracker) {
         this.deduplicator = deduplicator;
+        this.healthTracker = healthTracker;
     }
 
     @Override
@@ -37,9 +40,17 @@ public class ExampleCreatedHandler implements EventConsumer {
                 envelope.eventId(), envelope.tenantId());
 
         // TODO: implement business reaction to example.created
-        // e.g. send a welcome notification, trigger a downstream process, etc.
 
         deduplicator.markProcessed(
+                envelope.eventId(),
+                envelope.eventType(),
+                envelope.tenantId()
+        );
+
+        // Record successful processing — updates consumer_offsets and the
+        // consumer.lag.seconds gauge for this (consumer, event_type, tenant) tuple.
+        healthTracker.recordSuccess(
+                getClass().getSimpleName(),
                 envelope.eventId(),
                 envelope.eventType(),
                 envelope.tenantId()
