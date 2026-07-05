@@ -52,22 +52,34 @@ public class SqsEventConsumer {
     private final List<EventConsumer> consumers;
     private final SqsProperties sqsProperties;
     private final Optional<EventUpcasterRegistry> upcasterRegistry;
+    private final Optional<SqsBackpressureController> backpressureController;
 
     public SqsEventConsumer(
             SqsClient sqsClient,
             ObjectMapper objectMapper,
             List<EventConsumer> consumers,
             SqsProperties sqsProperties,
-            Optional<EventUpcasterRegistry> upcasterRegistry) {
+            Optional<EventUpcasterRegistry> upcasterRegistry,
+            Optional<SqsBackpressureController> backpressureController) {
         this.sqsClient = sqsClient;
         this.objectMapper = objectMapper;
         this.consumers = consumers;
         this.sqsProperties = sqsProperties;
         this.upcasterRegistry = upcasterRegistry;
+        this.backpressureController = backpressureController;
     }
 
     @Scheduled(fixedDelayString = "${app.events.sqs.poll-interval-ms:1000}")
     public void poll() {
+        // Skip this poll cycle when backpressure is active.
+        // SqsBackpressureController sets isPaused when the source queue depth exceeds
+        // lag-pause-threshold, giving the processing thread time to drain in-flight
+        // messages before fetching more. Polling resumes automatically.
+        if (backpressureController.map(SqsBackpressureController::isPaused).orElse(false)) {
+            log.debug("SQS poll skipped — backpressure active");
+            return;
+        }
+
         ReceiveMessageRequest request = ReceiveMessageRequest.builder()
                 .queueUrl(sqsProperties.queueUrl())
                 .maxNumberOfMessages(10)
