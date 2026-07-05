@@ -6,6 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import com.example.eda.security.RequiredScope;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -55,6 +56,7 @@ import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 @RestController
 @RequestMapping("/replay/jobs")
 @PreAuthorize("hasRole('PLATFORM_OPERATOR')")
+@RequiredScope("admin:manage")
 public class ReplayController {
 
     private static final Logger log = LoggerFactory.getLogger(ReplayController.class);

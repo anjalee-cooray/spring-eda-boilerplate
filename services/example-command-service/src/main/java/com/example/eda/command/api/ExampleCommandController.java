@@ -1,6 +1,7 @@
 package com.example.eda.command.api;
 
 import com.example.eda.db.quota.QuotaExceededException;
+import com.example.eda.security.RequiredScope;
 import jakarta.validation.Valid;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
@@ -16,6 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/commands/examples")
 @PreAuthorize("hasAnyRole('TENANT_ADMIN', 'TENANT_MEMBER')")
+@RequiredScope("commands:write")
 public class ExampleCommandController {
 
     private final ExampleCommandHandler handler;

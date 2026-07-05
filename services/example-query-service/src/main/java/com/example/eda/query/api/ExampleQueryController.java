@@ -2,6 +2,7 @@ package com.example.eda.query.api;
 
 import com.example.eda.query.projection.ExampleReadModel;
 import com.example.eda.query.projection.ExampleReadModelRepository;
+import com.example.eda.security.RequiredScope;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/queries/examples")
 @PreAuthorize("hasAnyRole('TENANT_ADMIN', 'TENANT_MEMBER')")
+@RequiredScope("queries:read")
 public class ExampleQueryController {
 
     private final ExampleReadModelRepository repository;
