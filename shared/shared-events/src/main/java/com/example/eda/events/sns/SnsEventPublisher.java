@@ -3,8 +3,11 @@ package com.example.eda.events.sns;
 import com.example.eda.events.envelope.EventEnvelope;
 import com.example.eda.events.kafka.EventPublishException;
 import com.example.eda.events.publisher.EventPublisher;
+import com.example.eda.events.schema.EventSchemaRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Map;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -12,8 +15,6 @@ import org.springframework.stereotype.Component;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sns.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sns.model.PublishRequest;
-
-import java.util.Map;
 
 @Component
 @ConditionalOnProperty(name = "app.events.broker", havingValue = "sns")
@@ -24,11 +25,17 @@ public class SnsEventPublisher implements EventPublisher {
     private final SnsClient snsClient;
     private final ObjectMapper objectMapper;
     private final SnsProperties properties;
+    private final Optional<EventSchemaRegistry> schemaRegistry;
 
-    public SnsEventPublisher(SnsClient snsClient, ObjectMapper objectMapper, SnsProperties properties) {
+    public SnsEventPublisher(
+            SnsClient snsClient,
+            ObjectMapper objectMapper,
+            SnsProperties properties,
+            Optional<EventSchemaRegistry> schemaRegistry) {
         this.snsClient = snsClient;
         this.objectMapper = objectMapper;
         this.properties = properties;
+        this.schemaRegistry = schemaRegistry;
     }
 
     @Override
@@ -39,6 +46,7 @@ public class SnsEventPublisher implements EventPublisher {
 
     @Override
     public void publish(EventEnvelope envelope, String destination) {
+        schemaRegistry.ifPresent(r -> r.validate(envelope));
         String payload = serialize(envelope);
 
         PublishRequest request = PublishRequest.builder()
@@ -52,14 +60,18 @@ public class SnsEventPublisher implements EventPublisher {
                     "tenant_id", MessageAttributeValue.builder()
                             .dataType("String")
                             .stringValue(envelope.tenantId())
+                            .build(),
+                    "schema_version", MessageAttributeValue.builder()
+                            .dataType("String")
+                            .stringValue(envelope.schemaVersion())
                             .build()
                 ))
                 .build();
 
         try {
             snsClient.publish(request);
-            log.debug("Published event type={} eventId={} to topicArn={}",
-                    envelope.eventType(), envelope.eventId(), destination);
+            log.debug("Published event type={} eventId={} schemaVersion={} to topicArn={}",
+                    envelope.eventType(), envelope.eventId(), envelope.schemaVersion(), destination);
         } catch (Exception ex) {
             log.error("Failed to publish event type={} eventId={} to topicArn={}",
                     envelope.eventType(), envelope.eventId(), destination, ex);

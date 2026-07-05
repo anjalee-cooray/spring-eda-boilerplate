@@ -9,4 +9,5 @@ dependencies {
     implementation 'software.amazon.awssdk:sns:2.29.0'
     implementation 'software.amazon.awssdk:sqs:2.29.0'
     implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'com.networknt:json-schema-validator:1.4.0'
 }

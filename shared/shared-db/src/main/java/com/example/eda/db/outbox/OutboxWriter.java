@@ -25,6 +25,11 @@ public class OutboxWriter {
 
     @Transactional(propagation = Propagation.MANDATORY)
     public OutboxRecord write(String eventType, Object payload, String correlationId) {
+        return write(eventType, "1", payload, correlationId);
+    }
+
+    @Transactional(propagation = Propagation.MANDATORY)
+    public OutboxRecord write(String eventType, String schemaVersion, Object payload, String correlationId) {
         String tenantId = TenantContextHolder.get().tenantId();
         String payloadJson = serialize(payload);
 
@@ -32,6 +37,7 @@ public class OutboxWriter {
                 .eventId(UUID.randomUUID())
                 .tenantId(tenantId)
                 .eventType(eventType)
+                .schemaVersion(schemaVersion)
                 .payload(payloadJson)
                 .correlationId(correlationId)
                 .build();

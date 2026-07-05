@@ -6,7 +6,13 @@ import java.util.UUID;
 
 /**
  * Standard wrapper for every domain event that travels over the message broker.
- * All fields are required except causation_id which is null for root events.
+ *
+ * schema_version identifies which payload schema version was used at publish time.
+ * Consumers apply an EventUpcaster chain to normalise older events to the latest
+ * schema before dispatching to handlers.
+ *
+ * Backward compatibility: schema_version is optional in JSON — events published
+ * before this field was introduced deserialise to "1" via the compact constructor.
  */
 public record EventEnvelope(
         @JsonProperty("event_id") UUID eventId,
@@ -15,7 +21,8 @@ public record EventEnvelope(
         @JsonProperty("correlation_id") String correlationId,
         @JsonProperty("causation_id") String causationId,
         @JsonProperty("occurred_at") Instant occurredAt,
-        @JsonProperty("payload") Object payload
+        @JsonProperty("payload") Object payload,
+        @JsonProperty("schema_version") String schemaVersion
 ) {
 
     public EventEnvelope {
@@ -37,6 +44,8 @@ public record EventEnvelope(
         if (payload == null) {
             throw new IllegalArgumentException("payload must not be null");
         }
+        // Default to "1" when deserialising events that pre-date schema versioning
+        schemaVersion = schemaVersion != null ? schemaVersion : "1";
     }
 
     public static Builder builder() {
@@ -51,6 +60,7 @@ public record EventEnvelope(
         private String causationId;
         private Instant occurredAt = Instant.now();
         private Object payload;
+        private String schemaVersion = "1";
 
         public Builder eventType(String eventType) { this.eventType = eventType; return this; }
         public Builder tenantId(String tenantId) { this.tenantId = tenantId; return this; }
@@ -58,9 +68,12 @@ public record EventEnvelope(
         public Builder causationId(String causationId) { this.causationId = causationId; return this; }
         public Builder occurredAt(Instant occurredAt) { this.occurredAt = occurredAt; return this; }
         public Builder payload(Object payload) { this.payload = payload; return this; }
+        public Builder schemaVersion(String schemaVersion) { this.schemaVersion = schemaVersion; return this; }
 
         public EventEnvelope build() {
-            return new EventEnvelope(eventId, eventType, tenantId, correlationId, causationId, occurredAt, payload);
+            return new EventEnvelope(
+                    eventId, eventType, tenantId, correlationId, causationId,
+                    occurredAt, payload, schemaVersion);
         }
     }
 }

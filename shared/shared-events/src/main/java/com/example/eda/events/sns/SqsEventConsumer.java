@@ -2,6 +2,7 @@ package com.example.eda.events.sns;
 
 import com.example.eda.events.consumer.EventConsumer;
 import com.example.eda.events.envelope.EventEnvelope;
+import com.example.eda.events.schema.EventUpcasterRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,6 +17,7 @@ import software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName;
 import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Polls SQS for domain events and dispatches to registered EventConsumer handlers.
@@ -49,16 +51,19 @@ public class SqsEventConsumer {
     private final ObjectMapper objectMapper;
     private final List<EventConsumer> consumers;
     private final SqsProperties sqsProperties;
+    private final Optional<EventUpcasterRegistry> upcasterRegistry;
 
     public SqsEventConsumer(
             SqsClient sqsClient,
             ObjectMapper objectMapper,
             List<EventConsumer> consumers,
-            SqsProperties sqsProperties) {
+            SqsProperties sqsProperties,
+            Optional<EventUpcasterRegistry> upcasterRegistry) {
         this.sqsClient = sqsClient;
         this.objectMapper = objectMapper;
         this.consumers = consumers;
         this.sqsProperties = sqsProperties;
+        this.upcasterRegistry = upcasterRegistry;
     }
 
     @Scheduled(fixedDelayString = "${app.events.sqs.poll-interval-ms:1000}")
@@ -80,7 +85,10 @@ public class SqsEventConsumer {
 
     private void process(Message message) {
         try {
-            EventEnvelope envelope = objectMapper.readValue(message.body(), EventEnvelope.class);
+            EventEnvelope raw = objectMapper.readValue(message.body(), EventEnvelope.class);
+            EventEnvelope envelope = upcasterRegistry
+                    .map(r -> r.upcastToLatest(raw))
+                    .orElse(raw);
             consumers.stream()
                     .filter(c -> c.supports(envelope.eventType()))
                     .forEach(c -> c.handle(envelope));

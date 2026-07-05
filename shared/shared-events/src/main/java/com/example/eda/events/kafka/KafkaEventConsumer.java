@@ -2,15 +2,16 @@ package com.example.eda.events.kafka;
 
 import com.example.eda.events.consumer.EventConsumer;
 import com.example.eda.events.envelope.EventEnvelope;
+import com.example.eda.events.schema.EventUpcasterRegistry;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.List;
+import java.util.Optional;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
-
-import java.util.List;
 
 @Component
 @ConditionalOnProperty(name = "app.events.broker", havingValue = "kafka")
@@ -20,10 +21,15 @@ public class KafkaEventConsumer {
 
     private final List<EventConsumer> consumers;
     private final ObjectMapper objectMapper;
+    private final Optional<EventUpcasterRegistry> upcasterRegistry;
 
-    public KafkaEventConsumer(List<EventConsumer> consumers, ObjectMapper objectMapper) {
+    public KafkaEventConsumer(
+            List<EventConsumer> consumers,
+            ObjectMapper objectMapper,
+            Optional<EventUpcasterRegistry> upcasterRegistry) {
         this.consumers = consumers;
         this.objectMapper = objectMapper;
+        this.upcasterRegistry = upcasterRegistry;
     }
 
     @KafkaListener(topics = "${app.events.kafka.topics}", groupId = "${spring.kafka.consumer.group-id}")
@@ -33,14 +39,20 @@ public class KafkaEventConsumer {
             return;
         }
 
+        // Upcast to the latest schema version before dispatching to handlers.
+        // No-op if no upcasters are registered or the event is already current.
+        EventEnvelope current = upcasterRegistry
+                .map(r -> r.upcastToLatest(envelope))
+                .orElse(envelope);
+
         consumers.stream()
-                .filter(c -> c.supports(envelope.eventType()))
+                .filter(c -> c.supports(current.eventType()))
                 .forEach(c -> {
                     try {
-                        c.handle(envelope);
+                        c.handle(current);
                     } catch (Exception ex) {
                         log.error("Consumer {} failed to handle event type={} eventId={}",
-                                c.getClass().getSimpleName(), envelope.eventType(), envelope.eventId(), ex);
+                                c.getClass().getSimpleName(), current.eventType(), current.eventId(), ex);
                         throw ex;
                     }
                 });

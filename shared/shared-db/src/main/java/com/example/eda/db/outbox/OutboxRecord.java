@@ -42,6 +42,10 @@ public class OutboxRecord {
     @Column(name = "correlation_id")
     private String correlationId;
 
+    @Column(name = "schema_version", nullable = false)
+    @Builder.Default
+    private String schemaVersion = "1";
+
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)
     @Builder.Default

@@ -1355,6 +1355,121 @@ Open **Grafana at http://localhost:3000** (admin / admin):
 
 ---
 
+### Event Schema Versioning
+
+Schema versioning lets you evolve event payloads over time without breaking consumers that were built against an older shape. The approach is **application-level versioning** — no external schema registry service is required.
+
+#### How it works
+
+Every `EventEnvelope` carries a `schema_version` field:
+
+```json
+{
+  "event_id": "...",
+  "event_type": "example.created",
+  "tenant_id": "tenant-1",
+  "schema_version": "1",
+  "payload": { "id": "...", "name": "...", "status": "ACTIVE" }
+}
+```
+
+**Publishers validate before sending.** `EventSchemaRegistry` loads JSON Schema files from `classpath:schemas/` at startup and validates the payload before publishing. If a schema file exists for the event type + version, validation is strict. If no schema file exists, validation is skipped (opt-in adoption).
+
+**Consumers upcast before dispatching.** `EventUpcasterRegistry` applies a chain of `EventUpcaster` implementations to bring an incoming event up to the latest schema version before handler dispatch. The chain runs in version order: v1→v2 runs before v2→v3.
+
+```
+Publisher                        Broker                  Consumer
+─────────                        ──────                  ────────
+OutboxWriter                     Kafka / SQS             KafkaEventConsumer
+  write(type, version, payload)                            deserialize envelope
+  ↓                                                        ↓
+EventPublisher.publish()                                 UpcasterRegistry.upcastToLatest()
+  ↓                                                        ↓ (v1→v2, v2→v3 chain)
+EventSchemaRegistry.validate()   ──── envelope ────>    EventConsumer.handle(current)
+  (fail fast if invalid)
+```
+
+#### Schema file naming
+
+Schema files live in `shared-events/src/main/resources/schemas/` and follow the convention:
+
+```
+schemas/{event_type}-v{N}.json
+```
+
+Examples:
+```
+schemas/example.created-v1.json
+schemas/example.created-v2.json   ← add when bumping to v2
+schemas/example.updated-v1.json
+```
+
+The `EventSchemaRegistry` parses the filename to extract the event type and version number.
+
+#### Evolving a schema (step-by-step)
+
+**Backward-compatible change** (adding an optional field — no version bump needed):
+1. Add the new field with `additionalProperties: true` in the existing schema file.
+2. No producer or consumer code changes required.
+
+**Breaking change** (removing a field, renaming, or changing a type):
+1. Increment the version in `EventVersion.java`:
+   ```java
+   private static final Map<String, String> CURRENT = Map.of(
+       "example.created", V2,  // was V1
+       ...
+   );
+   ```
+2. Add a new schema file: `schemas/example.created-v2.json`
+3. Keep `schemas/example.created-v1.json` — do not delete it.
+4. Implement `EventUpcaster` in each consumer service:
+   ```java
+   @Component
+   public class ExampleCreatedV1ToV2Upcaster implements EventUpcaster {
+       public String eventType()   { return "example.created"; }
+       public String fromVersion() { return "1"; }
+       public String toVersion()   { return "2"; }
+
+       public EventEnvelope upcast(EventEnvelope envelope) {
+           Map<String, Object> payload = new LinkedHashMap<>((Map) envelope.payload());
+           payload.put("displayName", payload.getOrDefault("name", ""));
+           return EventEnvelope.builder()
+               // ... copy identity fields ...
+               .payload(payload)
+               .schemaVersion("2")
+               .build();
+       }
+   }
+   ```
+5. Deploy consumers before rolling out the new producer version (expand-then-contract).
+
+#### Compatibility rules
+
+| Change type | Version bump? | Upcaster needed? |
+|---|---|---|
+| Add optional field | No | No |
+| Add required field with default | Yes | Yes (synthesise the default) |
+| Remove field | Yes | Yes (consumers ignore it via `additionalProperties: true`) |
+| Rename field | Yes | Yes (copy old → new, drop old) |
+| Change field type | Yes | Yes (convert the value) |
+
+#### Key classes
+
+| Class | Location | Role |
+|---|---|---|
+| `EventSchemaRegistry` | `shared-events` | Loads schemas, validates on publish |
+| `EventVersion` | `shared-events` | Maps event type → current version number |
+| `EventUpcaster` | `shared-events` | Interface for a single version migration |
+| `EventUpcasterRegistry` | `shared-events` | Chains upcasters; called before handler dispatch |
+| `SchemaValidationException` | `shared-events` | Thrown when payload fails schema validation |
+| `ExampleCreatedV1ToV2Upcaster` | `example-consumer-service` | Template upcaster (commented out) |
+
+#### Replay and schema versions
+
+Event replay re-publishes outbox records with their **original `schema_version`**. This means consumers always receive events at the version they were originally published with, regardless of the current schema version. The upcaster chain then normalises them before handler dispatch — making replay safe even across schema migrations.
+
+---
+
 ## What each verification proves
 
 | Test | What it proves |
@@ -1375,3 +1490,5 @@ Open **Grafana at http://localhost:3000** (admin / admin):
 | Consumer logs "Skipping duplicate" | Inbox deduplication made replay safe — already-processed events skipped |
 | Actuator health returns UP | All services healthy |
 | Grafana trace links to logs | OTel + Loki + Tempo wired correctly |
+| Invalid payload → SchemaValidationException | EventSchemaRegistry enforcing JSON Schema before publish |
+| Old event (v1) handled by v2 consumer | EventUpcasterRegistry chain normalised schema before dispatch |

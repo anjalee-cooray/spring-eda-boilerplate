@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "example.updated-v1",
+  "title": "ExampleUpdated v1",
+  "description": "Payload schema for the example.updated event, schema version 1.",
+  "type": "object",
+  "required": ["id", "tenantId"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier of the updated entity."
+    },
+    "tenantId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Tenant that owns this entity."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Updated display name (if changed)."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ACTIVE", "INACTIVE"],
+      "description": "Updated lifecycle status (if changed)."
+    }
+  },
+  "additionalProperties": true
+}

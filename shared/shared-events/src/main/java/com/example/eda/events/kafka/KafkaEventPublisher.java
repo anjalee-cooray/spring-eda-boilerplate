@@ -2,8 +2,10 @@ package com.example.eda.events.kafka;
 
 import com.example.eda.events.envelope.EventEnvelope;
 import com.example.eda.events.publisher.EventPublisher;
+import com.example.eda.events.schema.EventSchemaRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -18,10 +20,15 @@ public class KafkaEventPublisher implements EventPublisher {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final ObjectMapper objectMapper;
+    private final Optional<EventSchemaRegistry> schemaRegistry;
 
-    public KafkaEventPublisher(KafkaTemplate<String, String> kafkaTemplate, ObjectMapper objectMapper) {
+    public KafkaEventPublisher(
+            KafkaTemplate<String, String> kafkaTemplate,
+            ObjectMapper objectMapper,
+            Optional<EventSchemaRegistry> schemaRegistry) {
         this.kafkaTemplate = kafkaTemplate;
         this.objectMapper = objectMapper;
+        this.schemaRegistry = schemaRegistry;
     }
 
     @Override
@@ -31,6 +38,7 @@ public class KafkaEventPublisher implements EventPublisher {
 
     @Override
     public void publish(EventEnvelope envelope, String destination) {
+        schemaRegistry.ifPresent(r -> r.validate(envelope));
         String payload = serialize(envelope);
         kafkaTemplate.send(destination, envelope.tenantId(), payload)
                 .whenComplete((result, ex) -> {

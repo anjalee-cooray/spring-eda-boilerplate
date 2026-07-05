@@ -150,8 +150,8 @@ public class ReplayJobService {
                     .payload(payload)
                     .build();
 
-            // Override the auto-generated eventId with the original so consumers
-            // can deduplicate via their inbox_records table
+            // Re-publish with the original event_id (inbox dedup makes replay safe)
+            // and the original schema_version so consumers apply the correct upcaster chain.
             EventEnvelope withOriginalId = new EventEnvelope(
                     record.getEventId(),
                     envelope.eventType(),
@@ -159,7 +159,8 @@ public class ReplayJobService {
                     envelope.correlationId(),
                     envelope.causationId(),
                     envelope.occurredAt(),
-                    envelope.payload()
+                    envelope.payload(),
+                    record.getSchemaVersion()
             );
 
             eventPublisher.publish(withOriginalId);
