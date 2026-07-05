@@ -21,6 +21,15 @@ spring:
             - Path=/api/commands/**
           filters:
             - StripPrefix=1
+            # Rate limit by tenant — token bucket in Redis, 20 req/s sustained, burst 40.
+            # Adjust replenishRate/burstCapacity per pricing tier by replacing this with
+            # a custom RateLimiter bean (see RateLimiterConfig.java for guidance).
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_REPLENISH_RATE:20}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+                redis-rate-limiter.requestedTokens: 1
+                key-resolver: "#{@tenantKeyResolver}"
             - name: CircuitBreaker
               args:
                 name: command-service
@@ -35,6 +44,12 @@ spring:
             - Path=/api/queries/**
           filters:
             - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: ${RATE_LIMIT_REPLENISH_RATE:20}
+                redis-rate-limiter.burstCapacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+                redis-rate-limiter.requestedTokens: 1
+                key-resolver: "#{@tenantKeyResolver}"
             - name: Retry
               args:
                 retries: 3
@@ -78,6 +93,20 @@ logging:
 app:
   idempotency:
     ttl-hours: 24
+
+# Rate limiting — token bucket per tenant, backed by Redis.
+# replenishRate: sustained requests per second (tokens added per second)
+# burstCapacity: max tokens in bucket (handles burst traffic above sustained rate)
+# Override per environment via env vars: RATE_LIMIT_REPLENISH_RATE, RATE_LIMIT_BURST_CAPACITY
+# For per-tier limits (Free/Pro/Enterprise), implement a custom RateLimiter bean
+# that reads the tenant's tier from a cache/DB — see RateLimiterConfig.java.
+spring:
+  cloud:
+    gateway:
+      redis-rate-limiter:
+        replenish-rate: ${RATE_LIMIT_REPLENISH_RATE:20}
+        burst-capacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+        requested-tokens: 1
 
 # Circuit breaker config for gateway routes
 resilience4j:

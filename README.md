@@ -16,6 +16,7 @@ See [`next-eda-boilerplate`](https://github.com/anjalee-cooray/next-eda-boilerpl
 | **Async messaging** | Transactional Outbox pattern; pluggable Kafka or SNS/SQS |
 | **Data consistency** | Idempotent consumers via inbox deduplication table |
 | **Architecture** | CQRS (separate command + query services), event choreography pattern |
+| **Rate limiting** | Token bucket per tenant via Redis (`RequestRateLimiter`); 20 req/s sustained, burst 40; extension point for per-tier limits |
 | **HTTP idempotency** | `Idempotency-Key` header enforced at gateway; deduplication via Redis (24h TTL) |
 | **Resilience** | Circuit breaker + retry (Resilience4j) on gateway routes and Stripe; correct decorator order |
 | **Auth** | OIDC JWT — Okta by default, any OIDC-compliant provider via one env var |
@@ -30,7 +31,7 @@ See [`next-eda-boilerplate`](https://github.com/anjalee-cooray/next-eda-boilerpl
 
 ```
                         ┌────────────┐
-   Browser / Client ──► │ api-gateway │ (JWT validation, idempotency, circuit breaker, routing)
+   Browser / Client ──► │ api-gateway │ (JWT validation, rate limiting, idempotency, circuit breaker, routing)
                         └──────┬─────┘
                                │ HTTP
                ┌───────────────┴───────────────┐

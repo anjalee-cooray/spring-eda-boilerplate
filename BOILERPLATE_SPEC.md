@@ -18,7 +18,7 @@ Event-Driven Microservices with CQRS. Synchronous flows use HTTP (JWT-authentica
 
 | Service | Port | Responsibility |
 |---|---|---|
-| `api-gateway` | 9080 | JWT validation, tenant context propagation, HTTP idempotency, circuit breaker + retry, request routing |
+| `api-gateway` | 9080 | JWT validation, tenant context propagation, rate limiting, HTTP idempotency, circuit breaker + retry, request routing |
 | `example-command-service` | 8081 | Command handling, domain writes, event choreography, outbox writes |
 | `example-query-service` | 8082 | CQRS read model, event projection, query endpoints |
 | `example-consumer-service` | 8083 | Idempotent event consumer — pattern for notification/billing/audit services |
@@ -107,6 +107,25 @@ Use choreography by default. Upgrade to orchestration when you need to track sag
 ### Virtual Threads
 
 Project Loom is enabled globally via `--enable-preview` in all Dockerfiles and Gradle config. Every service benefits from virtual threads for I/O-bound workloads without any code changes.
+
+### Rate Limiting
+
+`RequestRateLimiter` (Spring Cloud Gateway's built-in Redis-backed filter) is applied to all routes. Rate limits are scoped per tenant using the `X-Tenant-Id` header, which is always present for authenticated requests (set by `TenantContextGatewayFilter`).
+
+**Algorithm:** Token bucket. Each tenant gets a bucket that refills at `replenishRate` tokens/second up to `burstCapacity`. Each request costs 1 token. Empty bucket → `429 Too Many Requests`.
+
+**Defaults** (overridable per environment via env vars):
+
+| Config | Default | Env var |
+|---|---|---|
+| `replenishRate` | 20 req/s | `RATE_LIMIT_REPLENISH_RATE` |
+| `burstCapacity` | 40 | `RATE_LIMIT_BURST_CAPACITY` |
+
+**Redis key format:** `request_rate_limiter.{tenant_id}.tokens` and `request_rate_limiter.{tenant_id}.timestamp` — atomically updated via a Lua script, so safe across multiple gateway instances.
+
+**Per-tier limits (Free / Pro / Enterprise):** The static defaults work for a single tier. To enforce different limits per pricing tier, implement a custom `RateLimiter` bean that reads the tenant's tier from a cache or DB and returns tier-specific `replenishRate`/`burstCapacity`. See `RateLimiterConfig.java` for the extension point.
+
+**Filter order on a request:** `TenantContextGatewayFilter` (sets `X-Tenant-Id`) → `IdempotencyFilter` (command routes) → `RequestRateLimiter` → `CircuitBreaker` → downstream service.
 
 ### Circuit Breaker + Retry
 
@@ -425,7 +444,7 @@ When you have enough event-driven side effects to justify a separate deployment,
 ## What This Boilerplate Does Not Include
 
 - API versioning strategy
-- Rate limiting (circuit breaker protects downstream services but per-client rate limiting is not implemented)
+- Per-tier rate limits (infrastructure is wired; tier-aware RateLimiter bean is your domain)
 - Tenant provisioning flow (tenants table exists, provisioning logic is your domain)
 - Email / notification service
 - File storage service
