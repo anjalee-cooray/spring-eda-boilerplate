@@ -1188,10 +1188,12 @@ echo $TOKEN    # should be a JWT string, not null
 ### Verify the full happy path
 
 ```bash
-# 1. Create an entity
+# 1. Create an entity — Idempotency-Key is required for all mutating commands
+IDEM_KEY=$(uuidgen)
 RESPONSE=$(curl -s -X POST http://localhost:9080/api/commands/examples \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEM_KEY" \
   -d '{"name": "hello"}')
 echo $RESPONSE              # {"id": "some-uuid"}
 ID=$(echo $RESPONSE | jq -r '.id')
@@ -1223,6 +1225,10 @@ SELECT event_type, status, created_at FROM outbox_records ORDER BY created_at DE
 
 -- Inbox — deduplication records from consumer-service and choreography handler
 SELECT event_id, processed_at FROM inbox_records ORDER BY processed_at DESC LIMIT 10;
+
+-- Replay jobs — audit trail of all replays triggered
+SELECT id, tenant_id, event_type, status, total_events, replayed_count, requested_by, created_at
+FROM replay_jobs ORDER BY created_at DESC LIMIT 10;
 
 \q
 ```
@@ -1256,6 +1262,85 @@ curl -s http://localhost:8083/actuator/health | jq .status   # "UP"
 curl -s http://localhost:8084/actuator/health | jq .status   # "UP"
 ```
 
+### Verify idempotency
+
+```bash
+IDEM_KEY=$(uuidgen)
+
+# First request — creates the entity
+curl -s -X POST http://localhost:9080/api/commands/examples \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEM_KEY" \
+  -d '{"name":"idem-test"}' | jq
+# {"id": "some-uuid"}
+
+# Second request with the same key — returns cached response, no duplicate created
+curl -sv -X POST http://localhost:9080/api/commands/examples \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $IDEM_KEY" \
+  -d '{"name":"idem-test"}' 2>&1 | grep "Idempotency-Status"
+# Idempotency-Status: HIT
+
+# Missing Idempotency-Key → 400
+curl -s -o /dev/null -w "%{http_code}" \
+  -X POST http://localhost:9080/api/commands/examples \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"no-key"}'
+# 400
+```
+
+### Verify rate limiting
+
+```bash
+# Fire 50 rapid requests — after burst capacity (40) is exhausted, should get 429
+for i in $(seq 1 50); do
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    http://localhost:9080/api/queries/examples \
+    -H "Authorization: Bearer $TOKEN")
+  echo "$i: $STATUS"
+done
+# First ~40: 200, then: 429 Too Many Requests
+# Bucket refills at 20 req/s — wait 2s and try again to confirm recovery
+```
+
+### Verify DLQ handling
+
+```bash
+# To test DLQ, temporarily break a handler (e.g. throw in ExampleCreatedHandler),
+# then publish an event. After 3 retries (1s + 2s + 4s), the message routes to the DLQ.
+
+# Watch consumer-service logs for DLQ routing:
+docker compose logs -f example-consumer-service | grep "DLQ"
+# DLQ event received — operator action required dlqTopic=example.created.dlq ...
+
+# Check the Prometheus counter (after Grafana scrapes):
+curl -s http://localhost:8083/actuator/prometheus | grep events_dlq_received
+# events_dlq_received_total{topic="example.created.dlq"} 1.0
+```
+
+### Verify event replay
+
+```bash
+# Trigger a full replay for tenant-1 (re-publishes all PUBLISHED outbox records)
+make replay TENANT=tenant-1
+# Returns: {"id":"<job-uuid>","status":"PENDING",...}
+
+# Poll until COMPLETED
+make replay-status JOB=<job-uuid>
+# {"status":"RUNNING","totalEvents":5,"replayedCount":3,...}
+# {"status":"COMPLETED","totalEvents":5,"replayedCount":5,...}
+
+# Confirm inbox deduplication worked — consumer-service skipped already-processed events
+docker compose logs example-consumer-service | grep "Skipping duplicate"
+# Skipping duplicate event eventId=... eventType=example.created
+
+# List all jobs
+make replay-list TENANT=tenant-1
+```
+
 ### Verify observability
 
 Open **Grafana at http://localhost:3000** (admin / admin):
@@ -1274,12 +1359,19 @@ Open **Grafana at http://localhost:3000** (admin / admin):
 
 | Test | What it proves |
 |---|---|
-| POST → 201 | Command handler, RLS write, outbox write |
-| GET returns entity | Outbox relay, Kafka, projector, read model |
-| Status = ACTIVE | Choreography handler received and processed the event |
+| POST with Idempotency-Key → 201 | Command handler, RLS write, outbox write, idempotency filter accepted key |
+| POST without Idempotency-Key → 400 | IdempotencyFilter enforcing key requirement on command routes |
+| Retry with same key → HIT header | Redis idempotency cache hit, no duplicate entity created |
+| GET returns entity | Outbox relay, broker, projector, read model projection |
+| Status = ACTIVE | Choreography handler received, processed, and re-published the event |
 | Outbox status = PUBLISHED | Relay polled and published successfully |
 | Inbox records exist | Idempotent consumer deduplication is running |
+| Rapid GETs → 429 after burst | Redis token bucket rate limiter enforcing per-tenant limits |
 | DB query without tenant → 0 rows | RLS isolation enforced at database level |
 | 401 without token | Gateway JWT validation |
+| DLQ log line appears | DefaultErrorHandler retried and routed to DLQ after exhaustion |
+| events_dlq_received counter > 0 | Micrometer counter wired to DLQ consumer |
+| Replay job → COMPLETED | ReplayJobService queried outbox, re-published via EventPublisher |
+| Consumer logs "Skipping duplicate" | Inbox deduplication made replay safe — already-processed events skipped |
 | Actuator health returns UP | All services healthy |
 | Grafana trace links to logs | OTel + Loki + Tempo wired correctly |
