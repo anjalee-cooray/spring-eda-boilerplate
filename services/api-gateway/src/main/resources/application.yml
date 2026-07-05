@@ -18,10 +18,18 @@ spring:
         # POST/PUT/DELETE only. No Retry filter — commands are not idempotent
         # at the gateway level. Clients must retry with the same Idempotency-Key.
         # The IdempotencyFilter handles deduplication via Redis.
+        #
+        # Timeouts (per-route, overrides global defaults):
+        #   connect-timeout — max time to establish TCP connection to command-service
+        #   response-timeout — max time to receive the full HTTP response (write operations
+        #     are typically fast; 10s accommodates occasional DB contention)
         - id: command-service
           uri: ${COMMAND_SERVICE_URL:http://localhost:8081}
           predicates:
             - Path=/api/commands/**
+          metadata:
+            connect-timeout: ${GATEWAY_COMMAND_CONNECT_TIMEOUT_MS:2000}
+            response-timeout: ${GATEWAY_COMMAND_RESPONSE_TIMEOUT_MS:10000}
           filters:
             - StripPrefix=1
             # Rate limit by tenant — token bucket in Redis, 20 req/s sustained, burst 40.
@@ -41,10 +49,17 @@ spring:
         # ── Query routes ────────────────────────────────────────────────────
         # GET only. Safe to retry — GET is idempotent by definition.
         # Retry runs inside the circuit breaker: CB sees final outcome after retries.
+        #
+        # Timeouts (per-route):
+        #   response-timeout — 30s; queries can be complex (reporting, aggregations).
+        #   Longer than command timeout so slow reports don't affect command latency.
         - id: query-service
           uri: ${QUERY_SERVICE_URL:http://localhost:8082}
           predicates:
             - Path=/api/queries/**
+          metadata:
+            connect-timeout: ${GATEWAY_QUERY_CONNECT_TIMEOUT_MS:2000}
+            response-timeout: ${GATEWAY_QUERY_RESPONSE_TIMEOUT_MS:30000}
           filters:
             - StripPrefix=1
             - name: RequestRateLimiter
