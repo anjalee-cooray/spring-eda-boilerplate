@@ -1162,6 +1162,94 @@ make sns-setup        # create topics, queues, DLQs, subscription
 
 ---
 
+## Event Store — Permanent Audit Log
+
+### The gap in the pure outbox approach
+
+`outbox_records` is a relay queue, not an event log:
+- Status changes from `PENDING` → `PUBLISHED` (mutable)
+- Rows are candidates for cleanup once published
+- Replay requires Kafka log retention to still hold the messages
+- No queryable history of what happened and when
+
+The `event_store` table fills this gap.
+
+### What the event store provides
+
+| Capability | How |
+|---|---|
+| Full audit trail | Every event ever emitted, tenant-scoped, timestamped, never deleted |
+| Event sourcing | All events for one aggregate in order → reconstruct its state |
+| Durable replay | Re-publish from event_store, independent of broker retention |
+| Root cause analysis | Trace a saga or request via `correlation_id` across event types |
+
+### Atomicity guarantee
+
+`EventStoreWriter` is called inside `OutboxWriter.write()` under `@Transactional(MANDATORY)`, so both writes happen in the same transaction as the domain write:
+
+```
+@Transactional
+handleCommand() {
+    domainRepository.save(entity)     ─┐
+    outboxWriter.write(eventType, ...) │  one transaction
+      ├─ outbox_records INSERT         │  commit or rollback together
+      └─ event_store INSERT           ─┘
+}
+```
+
+An event either appears in **both** tables or **neither**. There is no state where the relay has a record that the event store does not.
+
+### Schema
+
+```sql
+event_store (
+    id             UUID PK,
+    event_id       UUID UNIQUE,        -- stable business ID (same as outbox event_id)
+    event_type     TEXT,
+    tenant_id      TEXT,
+    aggregate_id   TEXT,               -- optional: e.g. "order-uuid"
+    aggregate_type TEXT,               -- optional: e.g. "Order"
+    schema_version TEXT,
+    payload        JSONB,
+    correlation_id TEXT,
+    causation_id   TEXT,
+    occurred_at    TIMESTAMPTZ
+)
+```
+
+**aggregate_id / aggregate_type** are optional fields for event-sourcing scenarios. When set, `EventStoreRepository.findByAggregateIdOrderByOccurredAtAsc()` returns the full event stream for that entity.
+
+### Usage patterns
+
+**Audit query — what happened to booking X?**
+```sql
+SELECT event_type, payload, occurred_at
+FROM event_store
+WHERE tenant_id = 'tenant-1'
+  AND correlation_id = '<booking-correlation-id>'
+ORDER BY occurred_at;
+```
+
+**Event sourcing — reconstruct Order aggregate:**
+```java
+List<EventStoreRecord> events =
+    eventStoreRepository.findByAggregateIdOrderByOccurredAtAsc(orderId);
+// apply events to an empty Order shell to rebuild current state
+```
+
+**Durable replay — re-publish without broker dependency:**
+```java
+// query event_store directly (not outbox) for replay
+eventStoreRepository.findByTenant(tenantId, eventType, from, to, pageable)
+    .forEach(record -> eventPublisher.publish(buildEnvelope(record)));
+```
+
+### Relation to outbox replay
+
+`ReplayJobService` currently reads from `outbox_records WHERE status = 'PUBLISHED'`. This means replay only works while those rows exist (before cleanup). By querying `event_store` instead, replay becomes independent of outbox lifecycle — you can clean up PUBLISHED outbox records without losing the ability to replay.
+
+---
+
 ## Saga Orchestration
 
 ### Choreography vs Orchestration
