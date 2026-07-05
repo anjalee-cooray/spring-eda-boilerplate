@@ -70,6 +70,11 @@ app:
     # Keep this > Prometheus scrape interval (default 15s) to avoid stale reads.
     lag-refresh-ms: ${KAFKA_LAG_REFRESH_MS:15000}
 
+  sqs:
+    # How often SqsConsumerLagMetrics refreshes queue depth from SQS GetQueueAttributes.
+    # Keep this > Prometheus scrape interval (default 15s) to avoid stale reads.
+    lag-refresh-ms: ${SQS_LAG_REFRESH_MS:15000}
+
   consumer:
     backpressure:
       # Pause all Kafka listeners when max partition lag exceeds this threshold.
