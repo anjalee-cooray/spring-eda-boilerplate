@@ -1355,6 +1355,140 @@ Open **Grafana at http://localhost:3000** (admin / admin):
 
 ---
 
+### Outbox Relay — At-Least-Once Guarantees Under Failure
+
+The Transactional Outbox pattern guarantees an event is **written** atomically with the domain change. The relay's job is to guarantee it is **delivered** — even when the relay crashes, restarts, or runs as multiple concurrent instances.
+
+#### Problems with the naïve approach
+
+A simple `@Transactional poll()` that reads, publishes, and marks PUBLISHED in a single transaction has four failure modes:
+
+| Failure | What goes wrong |
+|---|---|
+| Two relay pods run simultaneously | Both read the same PENDING records, both publish — double delivery |
+| Crash after broker send, before DB commit | Record stays PENDING, re-published on restart — eventId is different each time so inbox deduplication is bypassed |
+| Broker permanently unavailable | Record retried on every poll forever — no failure state, no alert |
+| DB connection held during broker call | Long-running network I/O inside a transaction holds a connection pool slot |
+
+#### Three-phase commit pattern
+
+The relay uses a three-phase approach that eliminates all four problems:
+
+```
+Phase 1 — CLAIM (REQUIRES_NEW tx, commits before Phase 2)
+  OutboxClaimService:
+    SELECT id FROM outbox_records
+    WHERE status = 'PENDING'
+    ORDER BY created_at ASC
+    LIMIT :batchSize
+    FOR UPDATE SKIP LOCKED         ← concurrent relay pods see disjoint batches
+    ;
+    UPDATE outbox_records
+    SET status = 'IN_FLIGHT',
+        locked_until = now() + 30s,  ← dead-man's switch for crash recovery
+        attempt_count = attempt_count + 1
+    WHERE id IN (:claimedIds);
+  ── transaction commits ──
+
+Phase 2 — PUBLISH (no transaction, no DB connection held)
+  eventPublisher.publish(buildEnvelope(record))
+    envelope.eventId = record.eventId   ← ORIGINAL id, not auto-generated
+    envelope.schemaVersion = record.schemaVersion
+
+Phase 3 — COMPLETE (REQUIRES_NEW tx per record)
+  On success  → status = PUBLISHED, locked_until = NULL
+  On failure, attempts < max  → status = PENDING (retry on next poll)
+  On failure, attempts ≥ max  → status = FAILED  (alert required)
+```
+
+#### SKIP LOCKED — concurrent relay safety
+
+`FOR UPDATE SKIP LOCKED` is a PostgreSQL row-level locking hint. When relay pod A locks rows 1–50, relay pod B's identical query skips those rows and returns rows 51–100 instead of blocking. The result:
+
+- Two relay instances double throughput without producing duplicates
+- Rolling deploys are safe — old and new versions relay disjoint batches simultaneously
+- No application-level distributed locking required
+
+#### Crash recovery — the reclaimer
+
+If the relay crashes between Phase 1 (claim) and Phase 3 (complete), the affected records stay `IN_FLIGHT` with a `locked_until` timestamp in the past. `OutboxReclaimTask` runs every 60 seconds (configurable via `app.relay.reclaim-interval-ms`):
+
+```
+find IN_FLIGHT records where locked_until < now()
+for each:
+  if attempt_count < max_attempts → PENDING  (re-enters Phase 1 on next poll)
+  if attempt_count ≥ max_attempts → FAILED   (operator action required)
+```
+
+The reclaimer does not publish events directly — it only resets DB state. The normal poll loop handles the re-publish on the next cycle.
+
+#### eventId preservation — why it matters
+
+The relay always builds the envelope with `record.eventId` (the UUID written by the domain service at insert time). If the relay auto-generated a fresh UUID on every publish attempt:
+
+1. Relay publishes event A with `event_id = X` → consumer processes, writes `event_id = X` to inbox_records
+2. Relay crashes, restarts, re-publishes event A with `event_id = Y`
+3. Consumer checks inbox_records for `Y` — not found — **processes the event a second time**
+
+By using the original ID, step 3 finds `X` is a known duplicate only if the record was already processed under that exact ID — which it was.
+
+#### Status lifecycle
+
+```
+        claim (SKIP LOCKED)
+PENDING ──────────────────► IN_FLIGHT ──── publish success ───► PUBLISHED
+  ▲                             │
+  │          publish failure    │ (attempt_count < max_attempts)
+  └─────────────────────────────┘
+                                │ (attempt_count ≥ max_attempts)
+                                └──────────────────────────────► FAILED
+```
+
+The reclaimer follows the same logic for expired IN_FLIGHT records.
+
+#### Database columns
+
+| Column | Type | Purpose |
+|---|---|---|
+| `status` | TEXT | `PENDING` / `IN_FLIGHT` / `PUBLISHED` / `FAILED` |
+| `locked_until` | TIMESTAMPTZ | Dead-man's switch; NULL when not IN_FLIGHT |
+| `attempt_count` | INTEGER | Incremented at claim time, not failure time |
+| `last_error` | TEXT | Last exception message for operator debugging |
+
+#### Metrics and alerting
+
+| Metric | Type | Alert condition |
+|---|---|---|
+| `outbox.relay.published` | Counter | — |
+| `outbox.relay.failed` | Counter | Any increment → P1 (event permanently lost) |
+| `outbox.records.failed` | Gauge | > 0 → P1 (FAILED records need operator action) |
+
+**Operator action for FAILED records:**
+```sql
+-- Find FAILED records
+SELECT id, event_type, tenant_id, attempt_count, last_error, created_at
+FROM outbox_records
+WHERE status = 'FAILED'
+ORDER BY created_at;
+
+-- After fixing the root cause, reset for retry:
+UPDATE outbox_records
+SET status = 'PENDING', attempt_count = 0, last_error = NULL, locked_until = NULL
+WHERE id = '<id>';
+```
+
+#### Configuration reference
+
+| Property | Default | Description |
+|---|---|---|
+| `app.relay.batch-size` | 50 | Records claimed per poll |
+| `app.relay.poll-interval-ms` | 1000 | Delay between polls |
+| `app.relay.lock-timeout-seconds` | 30 | IN_FLIGHT lock duration (dead-man's switch) |
+| `app.relay.max-attempts` | 5 | Attempts before FAILED |
+| `app.relay.reclaim-interval-ms` | 60000 | Reclaimer scan frequency |
+
+---
+
 ### Event Schema Versioning
 
 Schema versioning lets you evolve event payloads over time without breaking consumers that were built against an older shape. The approach is **application-level versioning** — no external schema registry service is required.
@@ -1492,3 +1626,6 @@ Event replay re-publishes outbox records with their **original `schema_version`*
 | Grafana trace links to logs | OTel + Loki + Tempo wired correctly |
 | Invalid payload → SchemaValidationException | EventSchemaRegistry enforcing JSON Schema before publish |
 | Old event (v1) handled by v2 consumer | EventUpcasterRegistry chain normalised schema before dispatch |
+| Two relay instances, zero duplicate deliveries | SKIP LOCKED claim ensures disjoint batches per pod |
+| Kill relay mid-poll, record still delivered | ReclaimTask reset expired IN_FLIGHT to PENDING on restart |
+| outbox.records.failed gauge > 0 | Record exhausted all attempts — alert fires, operator resets |

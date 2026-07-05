@@ -43,6 +43,16 @@ app:
   relay:
     poll-interval-ms: ${RELAY_POLL_INTERVAL_MS:1000}
     batch-size: ${RELAY_BATCH_SIZE:50}
+    # How long a claimed record stays IN_FLIGHT before OutboxReclaimTask resets it.
+    # Must exceed the maximum time to publish one full batch. Default 30s provides
+    # ~600ms headroom per record in a batch of 50.
+    lock-timeout-seconds: ${RELAY_LOCK_TIMEOUT_SECONDS:30}
+    # Max publish attempts before a record moves to FAILED status.
+    # FAILED records require operator investigation — check last_error in outbox_records.
+    max-attempts: ${RELAY_MAX_ATTEMPTS:5}
+    # How often OutboxReclaimTask scans for expired IN_FLIGHT records.
+    # Keep this > lock-timeout-seconds to avoid reclaiming records still being processed.
+    reclaim-interval-ms: ${RELAY_RECLAIM_INTERVAL_MS:60000}
 
 server:
   port: ${PORT:8084}

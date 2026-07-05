@@ -4,13 +4,63 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface OutboxRepository extends JpaRepository<OutboxRecord, UUID> {
 
-    @Query("SELECT o FROM OutboxRecord o WHERE o.status = 'PENDING' ORDER BY o.createdAt ASC LIMIT :limit")
-    List<OutboxRecord> findPendingRecords(int limit);
+    /**
+     * Selects IDs of PENDING records with a row-level FOR UPDATE SKIP LOCKED.
+     *
+     * SKIP LOCKED means rows already locked by another relay instance (i.e. in the
+     * process of being claimed) are silently skipped rather than causing a block or
+     * an error. This makes it safe to run multiple relay instances simultaneously —
+     * each instance claims a disjoint set of records.
+     *
+     * Must be called inside a transaction — the locks are held until that transaction
+     * commits or rolls back. The caller (OutboxClaimService) immediately follows with
+     * markInFlight() in the same transaction so the records transition to IN_FLIGHT
+     * before the locks are released.
+     *
+     * Returns List<Object> because native queries return raw JDBC values; the caller
+     * maps each element to UUID.
+     */
+    @Query(value = """
+            SELECT id FROM outbox_records
+            WHERE status = 'PENDING'
+            ORDER BY created_at ASC
+            LIMIT :limit
+            FOR UPDATE SKIP LOCKED
+            """, nativeQuery = true)
+    List<Object> findPendingIdsForUpdate(@Param("limit") int limit);
+
+    /**
+     * Bulk-updates a batch of records from PENDING → IN_FLIGHT.
+     *
+     * clearAutomatically = true evicts the updated entities from Hibernate's
+     * first-level cache so the subsequent findAllById() returns fresh state
+     * (IN_FLIGHT, with the new locked_until and incremented attempt_count).
+     */
+    @Modifying(clearAutomatically = true)
+    @Query("""
+            UPDATE OutboxRecord o
+            SET o.status       = 'IN_FLIGHT',
+                o.lockedUntil  = :lockedUntil,
+                o.attemptCount = o.attemptCount + 1
+            WHERE o.id IN :ids
+            """)
+    void markInFlight(@Param("ids") List<UUID> ids, @Param("lockedUntil") Instant lockedUntil);
+
+    /**
+     * Returns IN_FLIGHT records whose lock has expired (locked_until < now).
+     * Used by OutboxReclaimTask to find records orphaned by a crashed relay.
+     */
+    @Query("SELECT o FROM OutboxRecord o WHERE o.status = 'IN_FLIGHT' AND o.lockedUntil < :now")
+    List<OutboxRecord> findExpiredInFlight(@Param("now") Instant now);
+
+    /** Count records by status — used for Micrometer gauges and alerting. */
+    long countByStatus(OutboxRecord.OutboxStatus status);
 
     /**
      * Finds PUBLISHED records for replay, with optional filters.

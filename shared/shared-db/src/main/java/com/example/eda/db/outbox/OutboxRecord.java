@@ -58,12 +58,44 @@ public class OutboxRecord {
     @Column(name = "published_at")
     private Instant publishedAt;
 
+    @Column(name = "locked_until")
+    private Instant lockedUntil;
+
+    @Column(name = "attempt_count", nullable = false)
+    @Builder.Default
+    private int attemptCount = 0;
+
+    @Column(name = "last_error")
+    private String lastError;
+
     public void markPublished() {
         this.status = OutboxStatus.PUBLISHED;
         this.publishedAt = Instant.now();
+        this.lockedUntil = null;
+        this.lastError = null;
+    }
+
+    public void markInFlight(Instant lockedUntil) {
+        this.status = OutboxStatus.IN_FLIGHT;
+        this.lockedUntil = lockedUntil;
+        this.attemptCount++;
+    }
+
+    // Called by OutboxReclaimTask or OutboxRelayPoller when publish fails and
+    // attempts remain. The record will be picked up again on the next poll.
+    public void resetToPending(String error) {
+        this.status = OutboxStatus.PENDING;
+        this.lockedUntil = null;
+        this.lastError = error;
+    }
+
+    public void markFailed(String error) {
+        this.status = OutboxStatus.FAILED;
+        this.lockedUntil = null;
+        this.lastError = error;
     }
 
     public enum OutboxStatus {
-        PENDING, PUBLISHED, FAILED
+        PENDING, IN_FLIGHT, PUBLISHED, FAILED
     }
 }
