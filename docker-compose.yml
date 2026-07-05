@@ -152,6 +152,44 @@ services:
       - tempo
       - prometheus
 
+  # ─── Config Service ───────────────────────────────────────────────────────
+  # Serves runtime configuration to all services from config-repo/ (native filesystem).
+  # Must be healthy before application services start so they can fetch config.
+  # In production: set CONFIG_REPO_URI to a Git repo and SPRING_PROFILES_ACTIVE=git.
+  config-service:
+    build:
+      context: .
+      dockerfile: services/config-service/Dockerfile
+    container_name: eda-config-service
+    ports:
+      - "8888:8888"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      LOGGING_LOKI_URL: http://loki:3100
+      # Native backend: serve from the config-repo/ directory mounted below.
+      # Switch to Git: set CONFIG_REPO_URI=https://github.com/your-org/config-repo
+      #   and SPRING_PROFILES_ACTIVE=git
+      CONFIG_REPO_PATH: file:/workspace/config-repo
+    volumes:
+      - ./config-repo:/workspace/config-repo:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8888/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─── LocalStack (SNS/SQS + Secrets Manager local dev) ────────────────────
+  # Adds secretsmanager to the LocalStack SERVICES list.
+  # Create a test secret:
+  #   aws --endpoint-url=http://localhost:4566 secretsmanager create-secret \
+  #     --name /eda/dev/db \
+  #     --secret-string '{"spring.datasource.password":"postgres"}'
+  # Then set SECRETS_ENABLED=true and SECRETS_ENDPOINT_OVERRIDE=http://localstack:4566
+  # on the relevant service in docker-compose.override.yml.
+
   # ─── Migration (runs once then exits) ─────────────────────────────────────
 
   db-migrations:
@@ -178,6 +216,7 @@ services:
     ports:
       - "9080:8080"
     environment:
+      CONFIG_SERVER_URI: http://config-service:8888
       OIDC_ISSUER_URI: http://mock-oidc:8090/okta
       COMMAND_SERVICE_URL: http://example-command-service:8081
       QUERY_SERVICE_URL: http://example-query-service:8082
@@ -190,6 +229,8 @@ services:
       OTEL_LOGS_EXPORTER: none
       LOGGING_LOKI_URL: http://loki:3100
     depends_on:
+      config-service:
+        condition: service_healthy
       mock-oidc:
         condition: service_healthy
       redis:
@@ -205,6 +246,7 @@ services:
     ports:
       - "8081:8081"
     environment:
+      CONFIG_SERVER_URI: http://config-service:8888
       DB_URL: jdbc:postgresql://postgres:5432/edadb
       DB_USERNAME: postgres
       DB_PASSWORD: postgres
@@ -218,6 +260,8 @@ services:
       OTEL_LOGS_EXPORTER: none
       LOGGING_LOKI_URL: http://loki:3100
     depends_on:
+      config-service:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       kafka:
@@ -235,6 +279,7 @@ services:
     ports:
       - "8082:8082"
     environment:
+      CONFIG_SERVER_URI: http://config-service:8888
       DB_URL: jdbc:postgresql://postgres:5432/edadb
       DB_USERNAME: postgres
       DB_PASSWORD: postgres
@@ -249,6 +294,8 @@ services:
       OTEL_LOGS_EXPORTER: none
       LOGGING_LOKI_URL: http://loki:3100
     depends_on:
+      config-service:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       kafka:
@@ -266,6 +313,7 @@ services:
     ports:
       - "8083:8083"
     environment:
+      CONFIG_SERVER_URI: http://config-service:8888
       DB_URL: jdbc:postgresql://postgres:5432/edadb
       DB_USERNAME: postgres
       DB_PASSWORD: postgres
@@ -279,6 +327,8 @@ services:
       OTEL_LOGS_EXPORTER: none
       LOGGING_LOKI_URL: http://loki:3100
     depends_on:
+      config-service:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       kafka:
@@ -296,6 +346,7 @@ services:
     ports:
       - "8084:8084"
     environment:
+      CONFIG_SERVER_URI: http://config-service:8888
       DB_URL: jdbc:postgresql://postgres:5432/edadb
       DB_USERNAME: postgres
       DB_PASSWORD: postgres
@@ -310,6 +361,8 @@ services:
       OTEL_LOGS_EXPORTER: none
       LOGGING_LOKI_URL: http://loki:3100
     depends_on:
+      config-service:
+        condition: service_healthy
       postgres:
         condition: service_healthy
       kafka:
@@ -334,7 +387,7 @@ services:
     ports:
       - "4566:4566"
     environment:
-      SERVICES: sns,sqs
+      SERVICES: sns,sqs,secretsmanager
       DEFAULT_REGION: us-east-1
       AWS_DEFAULT_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test

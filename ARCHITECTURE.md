@@ -1813,6 +1813,160 @@ All tests use plain Mockito and AssertJ — no `@SpringBootTest`, no TestContain
 
 ---
 
+## Secret Management — AWS Secrets Manager
+
+Secrets (DB passwords, API keys, signing keys) are loaded at Spring startup via `SecretsManagerEnvironmentPostProcessor` in `shared-secrets`. They are injected as Spring properties before the application context is built, so no service code changes are needed — existing `${spring.datasource.password}` references resolve normally.
+
+### Secret format
+
+Each secret in AWS Secrets Manager is a flat JSON object. Keys become Spring property names:
+
+```json
+{
+  "spring.datasource.password": "s3cr3t",
+  "stripe.api.key": "sk_live_abc123"
+}
+```
+
+### Property source priority
+
+```
+System env vars           (highest — emergency override, e.g. SPRING_DATASOURCE_PASSWORD)
+  ↓
+awsSecretsManager         (Secrets Manager values loaded at startup)
+  ↓
+Config server             (config-repo/service.yml via Spring Cloud Config)
+  ↓
+application.yml defaults  (lowest)
+```
+
+This means a `SPRING_DATASOURCE_PASSWORD` env var always wins over Secrets Manager, which is useful for emergency credential rotation without a redeployment.
+
+### Activation
+
+| Environment | Setting |
+|---|---|
+| Local dev | `app.secrets.enabled=false` (default) — no AWS calls |
+| LocalStack | `app.secrets.enabled=true` + `app.secrets.endpoint-override=http://localhost:4566` |
+| Production | `SECRETS_ENABLED=true` — resolves from ECS task role or EC2 instance profile automatically |
+
+### Secret names config
+
+```yaml
+# config-repo/example-command-service.yml
+app.secrets.secret-names: /eda/prod/command-db,/eda/prod/stripe
+```
+
+### IAM policy required
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["secretsmanager:GetSecretValue"],
+  "Resource": ["arn:aws:secretsmanager:us-east-1:ACCOUNT:secret:/eda/prod/*"]
+}
+```
+
+### Local dev setup with LocalStack
+
+```bash
+# Start LocalStack with secretsmanager enabled (docker compose --profile sns up localstack)
+aws --endpoint-url=http://localhost:4566 secretsmanager create-secret \
+  --name /eda/dev/db \
+  --secret-string '{"spring.datasource.password":"postgres","spring.datasource.username":"postgres"}'
+
+# Enable in service
+SECRETS_ENABLED=true SECRETS_ENDPOINT_OVERRIDE=http://localhost:4566 ./gradlew bootRun
+```
+
+---
+
+## Runtime Configuration — Spring Cloud Config Server
+
+The config server (`services/config-service`) centralises runtime configuration for all services. Config changes take effect **without restarting pods** — no redeployment needed.
+
+### Architecture
+
+```
+Git repo / config-repo/
+  └── application.yml             (shared defaults — all services)
+  └── example-command-service.yml (service-specific overrides)
+  └── example-query-service.yml
+  └── example-consumer-service.yml
+  └── outbox-relay.yml
+  └── api-gateway.yml
+        ↓ (served by)
+config-service:8888
+  ├── GET /{service}/{profile}    → serves merged config
+  └── POST /actuator/busrefresh   → broadcasts refresh via Kafka bus
+        ↓ (fetched by)
+All services (spring.config.import=configserver:http://config-service:8888)
+```
+
+### How runtime refresh works
+
+1. Edit a file in `config-repo/` and push to Git (or edit the mounted local file)
+2. `POST http://any-service:port/actuator/busrefresh`
+3. Spring Cloud Bus publishes a `RefreshRemoteApplicationEvent` to Kafka topic `spring-cloud-bus`
+4. All service instances consume the event and refresh `@RefreshScope` beans
+5. The next call to any `Dynamic*Config` method returns the new value — **no pod restart**
+
+```bash
+# Trigger a broadcast config refresh from any service
+curl -X POST http://localhost:8888/actuator/busrefresh
+
+# Verify the new value took effect on the command service
+curl http://localhost:8081/actuator/env/app.rate-limit.commands-per-second
+```
+
+### @RefreshScope pattern
+
+Each service has a `Dynamic*Config` bean (`@Component @RefreshScope`) that holds all runtime-tunable values. Other beans inject this and call getters — the `@RefreshScope` proxy transparently returns the latest value after a refresh:
+
+```java
+@Component
+@RefreshScope
+public class DynamicCommandConfig {
+    @Value("${app.rate-limit.commands-per-second:100}")
+    private int commandsPerSecond;
+    // ...
+}
+```
+
+### @Scheduled beans and the refresh limitation
+
+`@Scheduled` beans (e.g. `KafkaBackpressureController`, `OutboxRelayPoller`) hold a direct reference that bypasses the `@RefreshScope` proxy. Annotating them with `@RefreshScope` has no effect on their `@Value` fields.
+
+**Fix**: inject `DynamicConsumerConfig` / `DynamicRelayConfig` and call `getLagPauseThreshold()` per tick instead of reading a `@Value` field at construction:
+
+```java
+// ✗ Not refreshable — @Value read once at construction
+@Value("${app.consumer.backpressure.lag-pause-threshold:10000}")
+private long lagPauseThreshold;
+
+// ✓ Refreshable — reads through the @RefreshScope proxy on every tick
+@Autowired DynamicConsumerConfig dynamicConfig;
+// In checkAndAdjust():
+long threshold = dynamicConfig.getLagPauseThreshold();
+```
+
+### Config server backends
+
+| Profile | Backend | Use case |
+|---|---|---|
+| `native` (default) | Local filesystem `config-repo/` | Local dev — no Git credentials needed |
+| `git` | Private Git repository | Production — version-controlled, audited |
+
+Switch to Git in production:
+```bash
+CONFIG_REPO_URI=https://github.com/your-org/eda-config-repo
+SPRING_PROFILES_ACTIVE=git
+CONFIG_REPO_USERNAME=...
+CONFIG_REPO_PASSWORD=...
+```
+
+---
+
 ## Local verification guide
 
 ### Start the stack
