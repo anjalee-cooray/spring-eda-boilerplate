@@ -955,6 +955,38 @@ Alert to set: `resilience4j_circuitbreaker_state == 1` → P2 alert, circuit bre
 
 ---
 
+## Grafana Dashboards
+
+Three dashboards are provisioned automatically from `docker/grafana/provisioning/dashboards/`:
+
+| Dashboard | UID | Purpose |
+|---|---|---|
+| Service Health | `eda-service-health` | HTTP request rate, P99 latency, error rate, JVM heap, outbox pending, thread count |
+| Event Pipeline | `eda-event-pipeline` | Outbox pending/in-flight/failed/published, relay publish rate, DLQ depth (Kafka + SQS), replay job status |
+| Consumer Health | `eda-consumer-health` | `kafka.consumer.lag` per partition, `sqs.consumer.lag` queue depth, `consumer.lag.seconds` per handler, backpressure state and duration, event processing rate and error rate |
+
+### Event Pipeline dashboard
+
+Key panels and the alert each one supports:
+
+| Panel | Metric | Related alert |
+|---|---|---|
+| Outbox — Failed Records | `outbox_records_failed` | `OutboxFailedRecords` |
+| Relay Publish Rate | `rate(outbox_relay_published_total[1m])` | `OutboxRelayNotPublishing` |
+| DLQ Depth — Kafka | `rate(events_dlq_received_total[5m])` | `DlqMessagesAccumulating` |
+| DLQ Depth — SQS | `sqs_consumer_lag{type="dlq"}` | CloudWatch alarm |
+
+### Consumer Health dashboard
+
+| Panel | Metric | Related alert |
+|---|---|---|
+| Kafka Lag per Partition | `kafka_consumer_lag` | `KafkaConsumerCriticalLag` |
+| SQS Queue Depth | `sqs_consumer_lag{type="source"}` | `SqsConsumerLagHigh` |
+| Consumer Lag (seconds) | `consumer_lag_seconds` | `ConsumerStale` |
+| Backpressure Active | `consumer_backpressure_active` | `BackpressureActive` |
+
+---
+
 ## Service discovery
 
 This boilerplate uses **platform DNS with environment variables** — no service registry (Eureka, Consul) is needed.
@@ -1967,10 +1999,14 @@ Open **Grafana at http://localhost:3000** (admin / admin):
 | What to check | Where |
 |---|---|
 | Service health dashboard | Dashboards → Service Health |
+| Event pipeline dashboard | Dashboards → Event Pipeline |
+| Consumer health dashboard | Dashboards → Consumer Health |
 | Structured logs with tenant_id | Explore → Loki → `{service="example-command-service"}` |
 | Distributed trace across services | Explore → Tempo → paste a `trace_id` from a log line |
 | Request rate and latency | Explore → Prometheus → `http_server_requests_seconds_count` |
 | Outbox backlog | Explore → Prometheus → `outbox_records_pending_total` |
+| DLQ accumulation | Event Pipeline dashboard → DLQ Depth panels |
+| Backpressure state | Consumer Health dashboard → Backpressure Active panel |
 
 ---
 

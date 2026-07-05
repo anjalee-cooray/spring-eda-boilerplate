@@ -1,0 +1,130 @@
+{
+  "title": "Consumer Health",
+  "uid": "eda-consumer-health",
+  "schemaVersion": 38,
+  "refresh": "10s",
+  "description": "Kafka and SQS consumer lag, handler processing time, and backpressure state",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Kafka Consumer Lag — Per Partition",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "description": "kafka.consumer.lag per topic-partition. Growing means consumer is slower than producer.",
+      "targets": [
+        {
+          "expr": "kafka_consumer_lag",
+          "legendFormat": "{{topic}}-{{partition}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": 0 },
+          { "color": "yellow", "value": 1000 },
+          { "color": "red", "value": 10000 }
+        ]}}
+      }
+    },
+    {
+      "id": 2,
+      "title": "SQS Consumer Lag — Queue Depth",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "description": "sqs.consumer.lag — visible + in-flight messages per queue.",
+      "targets": [
+        {
+          "expr": "sqs_consumer_lag{type=\"source\"}",
+          "legendFormat": "{{queue}} source"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": 0 },
+          { "color": "yellow", "value": 1000 },
+          { "color": "red", "value": 10000 }
+        ]}}
+      }
+    },
+    {
+      "id": 3,
+      "title": "Consumer Lag (seconds) — Per Handler",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "description": "consumer.lag.seconds — how many seconds behind each consumer handler is. Alert threshold: > 300s.",
+      "targets": [
+        {
+          "expr": "consumer_lag_seconds",
+          "legendFormat": "{{handler}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": 0 },
+          { "color": "yellow", "value": 60 },
+          { "color": "red", "value": 300 }
+        ]}}
+      }
+    },
+    {
+      "id": 4,
+      "title": "Backpressure Active",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 8, "w": 6, "h": 8 },
+      "description": "consumer.backpressure.active — 1 = consumers paused (lag too high), 0 = running normally.",
+      "targets": [
+        {
+          "expr": "consumer_backpressure_active",
+          "legendFormat": "backpressure"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "mappings": [
+          { "type": "value", "options": { "0": { "text": "RUNNING", "color": "green" }, "1": { "text": "PAUSED", "color": "red" } } }
+        ]}
+      }
+    },
+    {
+      "id": 5,
+      "title": "Backpressure Duration",
+      "type": "timeseries",
+      "gridPos": { "x": 18, "y": 8, "w": 6, "h": 8 },
+      "description": "Shows how often and for how long consumers are paused. Sustained pausing suggests under-provisioning.",
+      "targets": [
+        {
+          "expr": "consumer_backpressure_active",
+          "legendFormat": "paused (1=yes)"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Event Processing Rate — Per Handler",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(events_processed_total[1m])",
+          "legendFormat": "{{handler}} events/s"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Event Processing Errors — Per Handler",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(events_processed_errors_total[5m])",
+          "legendFormat": "{{handler}} errors/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "thresholds": { "steps": [
+          { "color": "green", "value": 0 },
+          { "color": "red", "value": 0.01 }
+        ]}}
+      }
+    }
+  ]
+}
