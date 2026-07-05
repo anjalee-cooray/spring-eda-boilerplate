@@ -182,14 +182,15 @@ public class OutboxRelayPoller {
                 .build();
 
         return new EventEnvelope(
-                record.getEventId(),   // must be the original — not auto-generated
+                record.getEventId(),     // must be the original — not auto-generated
                 base.eventType(),
                 base.tenantId(),
                 base.correlationId(),
                 base.causationId(),
                 base.occurredAt(),
                 base.payload(),
-                base.schemaVersion()
+                base.schemaVersion(),
+                record.getAggregateId() // preserved for deterministic Kafka partition routing
         );
     }
 

@@ -1418,6 +1418,182 @@ For flows with 10+ steps, external system calls (HTTP/gRPC), or distributed time
 
 ---
 
+## Ordered Event Processing — Kafka Partition Key Strategy
+
+Kafka preserves order only **within a single partition**. If two events for the same entity (e.g. `order-123`) land on different partitions, consumers may process them out of order. This section defines how the boilerplate enforces per-entity ordering.
+
+### Partition key derivation
+
+`KafkaEventPublisher` computes the message key before sending:
+
+```
+partitionKey = tenantId + ":" + aggregateId   when aggregateId is set
+partitionKey = tenantId                        fallback for non-entity events
+```
+
+**Why `tenantId:aggregateId` and not just `aggregateId`?**
+Two tenants may have entities with the same UUID (the ID space is per-tenant). Using `tenantId:aggregateId` prevents events from different tenants colliding on the same partition, which would violate row-level security isolation at the broker layer.
+
+### How to set the partition key
+
+Pass the entity's primary ID as `aggregateId` when writing to the outbox:
+
+```java
+// In your command handler / domain service:
+outboxWriter.write(
+    "order.shipped",       // event type
+    "1",                   // schema version
+    payload,               // event payload
+    correlationId,         // correlation ID
+    order.getId().toString() // ← aggregateId: routes all Order events to same partition
+);
+```
+
+When `aggregateId` is `null` (or the older two-arg `write` overloads are used), the publisher falls back to tenant-level routing — all events for the tenant share a partition. This is fine for low-volume or non-entity events.
+
+### Outbox → relay → broker chain
+
+The `aggregate_id` column is persisted in `outbox_records` (V012 migration). The relay reads it and passes it through to `EventEnvelope.aggregateId()`. `KafkaEventPublisher` then uses it as the Kafka message key. The key is also preserved during **replay** (`ReplayJobService` reads `record.getAggregateId()`) so replayed events land on the same partition as the originals.
+
+### SNS/SQS equivalent
+
+SNS does not have partition keys. SQS FIFO queues use a `MessageGroupId` for per-group ordering — set `MessageGroupId = tenantId + ":" + aggregateId` in `SnsEventPublisher.publish()` when using the FIFO variant.
+
+### Trade-offs
+
+| Decision | Rationale |
+|---|---|
+| `tenantId:aggregateId` composite key | Prevents cross-tenant partition collisions |
+| Null → tenant-level fallback | Backward compatible with pre-V012 events |
+| Stored in `outbox_records.aggregate_id` | Relay and replay both use the same key — consistent routing |
+| Not enforced for SNS standard topics | SNS does not support partitioning; per-entity ordering is a Kafka-specific guarantee |
+
+---
+
+## Publisher-Side Event Deduplication
+
+The boilerplate provides a three-layer deduplication chain to prevent the same event from being processed by consumers more than once:
+
+### Layer 1 — Outbox record uniqueness (DB constraint)
+
+`outbox_records.event_id` has a `UNIQUE` constraint (V002). Attempting to insert two outbox records with the same `event_id` fails at the database level. Because `OutboxWriter.write()` generates a fresh `UUID.randomUUID()` per call, this prevents duplicate entries from concurrent writes in the same request.
+
+### Layer 2 — Kafka idempotent producer (broker level)
+
+With `enable.idempotence=true` and `acks=all`, Kafka assigns each producer a **producer ID** and a **sequence number** per partition. If the broker receives two `ProduceRequest` calls with the same sequence number (e.g. after a network timeout and retry), it deduplicates at the broker and acknowledges only once. This prevents the relay from publishing the same message twice during transient network failures.
+
+Configuration applied to all Kafka producer configs:
+
+```yaml
+spring:
+  kafka:
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5   # max allowed with idempotence=true
+```
+
+### Layer 3 — Consumer inbox deduplication (application level)
+
+`InboxDeduplicator` writes every processed `event_id` to `inbox_records` in the same transaction as the domain write. If the same `event_id` arrives again (e.g. the relay published before crashing and then re-published after restart), the inbox check returns a duplicate and the handler is skipped silently.
+
+The relay always preserves the **original** `event_id` from `outbox_records.event_id` — it never generates a new one. This is what makes Layer 3 effective: at-least-once duplicates carry the same `event_id` and are caught by the inbox.
+
+### Deduplication chain summary
+
+```
+OutboxWriter.write()
+  └─ DB UNIQUE(event_id) prevents duplicate outbox records
+        │
+        ▼
+OutboxRelayPoller (Phase 2: publish)
+  └─ Kafka idempotent producer (enable.idempotence=true)
+        │
+        ▼
+KafkaEventConsumer / SqsEventConsumer
+  └─ InboxDeduplicator checks inbox_records UNIQUE(event_id)
+        └─ duplicate → skip handler (no business logic runs twice)
+```
+
+All three layers must be present. Removing any one layer creates a window where duplicates reach business logic.
+
+---
+
+## Backpressure — Consumer Lag Control
+
+When a consumer processes events slower than they are published, lag accumulates on the Kafka partition (or SQS queue). Without a backpressure mechanism, the consumer silently falls further behind until broker retention expires and events are lost.
+
+### Kafka: pause/resume via `KafkaBackpressureController`
+
+`KafkaBackpressureController` runs on a configurable schedule and checks the maximum lag across all tracked partitions via `KafkaConsumerLagMetrics.getMaxLag()`.
+
+```
+lag > lagPauseThreshold  → pause all KafkaListenerContainers
+lag < lagResumeThreshold → resume all KafkaListenerContainers
+```
+
+This creates a simple bang-bang controller: the consumer stops fetching from Kafka entirely when overwhelmed, giving the processing thread pool time to drain the in-flight batch. Once lag drops below the resume threshold, polling resumes automatically.
+
+```yaml
+app:
+  consumer:
+    backpressure:
+      lag-pause-threshold:  10000   # pause when > 10k messages behind
+      lag-resume-threshold: 1000    # resume when < 1k messages behind
+      check-interval-ms:    5000    # evaluate every 5 seconds
+```
+
+The controller emits a `consumer.backpressure.active` Micrometer gauge (1 = paused, 0 = running) for alerting.
+
+### Kafka: consumer tuning knobs
+
+When lag is persistent (not a transient spike), tune the consumer before adjusting the pause threshold:
+
+| Property | Default | Effect |
+|---|---|---|
+| `max.poll.records` | 500 | Increase to process more records per poll loop — up to memory limits |
+| `fetch.max.bytes` | 52428800 (50 MB) | Cap fetch size to prevent OOM on large batches |
+| `max.poll.interval.ms` | 300000 (5 min) | Must exceed the longest `handle()` call — if exceeded, broker revokes partition |
+
+```yaml
+spring:
+  kafka:
+    consumer:
+      properties:
+        max.poll.records: 500
+        fetch.max.bytes: 52428800
+        max.poll.interval.ms: 300000
+```
+
+### SQS: adaptive polling via `SqsBackpressureController`
+
+`SqsBackpressureController` checks `consumer.lag.seconds` from `consumer_offsets` (updated by `ConsumerHealthTracker` after each successful handle). If the consumer hasn't processed an event in longer than `lag-pause-threshold-seconds`, polling is paused via a shared `AtomicBoolean`. The `SqsEventConsumer.poll()` checks this flag at the top of each iteration and skips the receive call when paused.
+
+SQS queue depth can be monitored via the CloudWatch metric `ApproximateNumberOfMessagesVisible`. Add a CloudWatch alarm:
+
+```
+Metric:    SQS/ApproximateNumberOfMessagesVisible
+Namespace: AWS/SQS
+QueueName: example-created
+Threshold: > 10000 for 5 consecutive minutes
+Action:    trigger SNS → PagerDuty / OpsGenie
+```
+
+### Prometheus alert rules
+
+Alert rules are defined in `monitoring/prometheus-alerts.yml`. Key rules:
+
+| Alert | Expression | Severity |
+|---|---|---|
+| `KafkaConsumerHighLag` | `kafka_consumer_lag > 10000` for 2 min | warning |
+| `KafkaConsumerCriticalLag` | `kafka_consumer_lag > 100000` for 5 min | critical |
+| `ConsumerStale` | `consumer_lag_seconds > 300` for 1 min | warning |
+| `BackpressureActive` | `consumer_backpressure_active == 1` for 5 min | warning |
+| `OutboxFailedRecords` | `outbox_records_failed > 0` for 0 s | critical |
+
+---
+
 ## Local verification guide
 
 ### Start the stack

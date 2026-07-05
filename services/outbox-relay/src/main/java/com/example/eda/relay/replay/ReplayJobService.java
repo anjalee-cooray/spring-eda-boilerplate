@@ -160,7 +160,8 @@ public class ReplayJobService {
                     envelope.causationId(),
                     envelope.occurredAt(),
                     envelope.payload(),
-                    record.getSchemaVersion()
+                    record.getSchemaVersion(),
+                    record.getAggregateId()  // preserves original partition key on replay
             );
 
             eventPublisher.publish(withOriginalId);

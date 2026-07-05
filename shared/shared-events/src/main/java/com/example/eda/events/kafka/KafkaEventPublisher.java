@@ -40,7 +40,7 @@ public class KafkaEventPublisher implements EventPublisher {
     public void publish(EventEnvelope envelope, String destination) {
         schemaRegistry.ifPresent(r -> r.validate(envelope));
         String payload = serialize(envelope);
-        kafkaTemplate.send(destination, envelope.tenantId(), payload)
+        kafkaTemplate.send(destination, partitionKey(envelope), payload)
                 .whenComplete((result, ex) -> {
                     if (ex != null) {
                         log.error("Failed to publish event type={} eventId={} to topic={}",
@@ -50,6 +50,23 @@ public class KafkaEventPublisher implements EventPublisher {
                                 envelope.eventType(), envelope.eventId(), destination);
                     }
                 });
+    }
+
+    /**
+     * Derives the Kafka partition key from the envelope.
+     *
+     * When aggregateId is set, all events for the same entity go to the same
+     * partition — guaranteeing per-entity FIFO order. The tenantId prefix prevents
+     * two tenants with the same aggregateId from being co-located on one partition.
+     *
+     * Without aggregateId, all events for the same tenant share a partition —
+     * per-tenant ordering only, which may create hotspots for large tenants.
+     */
+    private String partitionKey(EventEnvelope envelope) {
+        if (envelope.aggregateId() != null && !envelope.aggregateId().isBlank()) {
+            return envelope.tenantId() + ":" + envelope.aggregateId();
+        }
+        return envelope.tenantId();
     }
 
     private String serialize(EventEnvelope envelope) {

@@ -35,11 +35,28 @@ public class OutboxWriter {
 
     @Transactional(propagation = Propagation.MANDATORY)
     public OutboxRecord write(String eventType, Object payload, String correlationId) {
-        return write(eventType, "1", payload, correlationId);
+        return write(eventType, "1", payload, correlationId, null);
     }
 
     @Transactional(propagation = Propagation.MANDATORY)
     public OutboxRecord write(String eventType, String schemaVersion, Object payload, String correlationId) {
+        return write(eventType, schemaVersion, payload, correlationId, null);
+    }
+
+    /**
+     * Full write with explicit aggregateId for per-entity Kafka partition routing.
+     *
+     * Pass the entity's primary ID (e.g. orderId, bookingId) as aggregateId.
+     * The outbox relay will use it to build the Kafka partition key
+     * "tenantId:aggregateId", routing all events for the same entity to the
+     * same partition and guaranteeing FIFO delivery for that entity.
+     *
+     * Pass null to fall back to tenant-level routing (all events for the tenant
+     * share a partition — fine for low-cardinality or non-entity events).
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public OutboxRecord write(String eventType, String schemaVersion, Object payload,
+                              String correlationId, String aggregateId) {
         String tenantId = TenantContextHolder.get().tenantId();
         UUID eventId = UUID.randomUUID();
         String payloadJson = serialize(payload);
@@ -51,6 +68,7 @@ public class OutboxWriter {
                 .schemaVersion(schemaVersion)
                 .payload(payloadJson)
                 .correlationId(correlationId)
+                .aggregateId(aggregateId)
                 .build();
 
         outboxRepository.save(record);

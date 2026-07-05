@@ -42,6 +42,12 @@ public class OutboxRecord {
     @Column(name = "correlation_id")
     private String correlationId;
 
+    // Kafka partition key base. KafkaEventPublisher builds the final key as
+    // "tenantId:aggregateId" so events for the same entity always land on the
+    // same partition and are consumed in FIFO order.
+    @Column(name = "aggregate_id")
+    private String aggregateId;
+
     @Column(name = "schema_version", nullable = false)
     @Builder.Default
     private String schemaVersion = "1";
