@@ -1,1 +1,2 @@
 com.example.eda.telemetry.TelemetryAutoConfiguration
+com.example.eda.telemetry.SentryAutoConfiguration

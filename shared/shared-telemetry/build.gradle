@@ -7,4 +7,8 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'io.micrometer:micrometer-registry-prometheus'
     implementation 'io.opentelemetry.instrumentation:opentelemetry-spring-boot-starter:2.10.0'
+
+    // Sentry — conditional on app.sentry.dsn; compileOnly so services that don't
+    // set the DSN don't pull Sentry onto the classpath at runtime.
+    compileOnly 'io.sentry:sentry-spring-boot-starter-jakarta:7.14.0'
 }
