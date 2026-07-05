@@ -31,7 +31,21 @@ spring:
 
 app:
   events:
+    # ── Broker selection ────────────────────────────────────────────────────
+    # Set EVENTS_BROKER=kafka  to use Kafka (default, local dev)
+    # Set EVENTS_BROKER=sns    to use AWS SNS + SQS (production AWS)
     broker: ${EVENTS_BROKER:kafka}
+
+    # ── SNS/SQS config (active when broker=sns) ─────────────────────────
+    # Command service only publishes — it does not consume from SQS.
+    # Uncomment when switching to SNS/SQS.
+    #
+    # sns:
+    #   default-topic-arn: ${SNS_DEFAULT_TOPIC_ARN:arn:aws:sns:us-east-1:000000000000:example-events}
+    #   topic-arns:
+    #     example.created: ${SNS_TOPIC_EXAMPLE_CREATED:arn:aws:sns:us-east-1:000000000000:example-created}
+    #   region: ${AWS_REGION:us-east-1}
+    #   endpoint-override: ${SNS_ENDPOINT_OVERRIDE:}   # leave blank in production
 
 server:
   port: ${PORT:8081}

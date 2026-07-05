@@ -32,3 +32,28 @@ down:
 # Stop and remove containers + volumes (full reset)
 clean:
 	docker compose down -v
+
+# Start LocalStack for SNS/SQS local development
+infra-sns:
+	docker compose --profile sns up localstack -d
+
+# Create SNS topics and SQS queues + DLQs in LocalStack
+# Run once after: make infra-sns
+sns-setup:
+	@echo "Creating SQS queues..."
+	aws --endpoint-url=http://localhost:4566 --region us-east-1 \
+	    sqs create-queue --queue-name example-created-dlq \
+	    --attributes '{"MessageRetentionPeriod":"1209600"}'
+	aws --endpoint-url=http://localhost:4566 --region us-east-1 \
+	    sqs create-queue --queue-name example-created \
+	    --attributes '{"RedrivePolicy":"{\"deadLetterTargetArn\":\"arn:aws:sqs:us-east-1:000000000000:example-created-dlq\",\"maxReceiveCount\":\"3\"}"}'
+	@echo "Creating SNS topic..."
+	aws --endpoint-url=http://localhost:4566 --region us-east-1 \
+	    sns create-topic --name example-created
+	@echo "Subscribing SQS queue to SNS topic..."
+	aws --endpoint-url=http://localhost:4566 --region us-east-1 \
+	    sns subscribe \
+	    --topic-arn arn:aws:sns:us-east-1:000000000000:example-created \
+	    --protocol sqs \
+	    --notification-endpoint arn:aws:sqs:us-east-1:000000000000:example-created
+	@echo "SNS/SQS setup complete. Queue URL: http://localhost:4566/000000000000/example-created"

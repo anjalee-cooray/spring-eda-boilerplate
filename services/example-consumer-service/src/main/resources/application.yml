@@ -30,12 +30,32 @@ spring:
 
 app:
   events:
+    # ── Broker selection ────────────────────────────────────────────────────
+    # Set EVENTS_BROKER=kafka  to use Kafka (default, local dev)
+    # Set EVENTS_BROKER=sns    to use AWS SNS + SQS (production AWS)
     broker: ${EVENTS_BROKER:kafka}
+
+    # ── Kafka config (active when broker=kafka) ──────────────────────────
     kafka:
       topics: ${KAFKA_TOPICS:example.created}
-      # DLQ topic naming convention: {original-topic}.dlq
-      # Add one entry per topic this service consumes.
+      # DLQ topic naming: {original-topic}.dlq — one per consumed topic
       dlq-topics: ${KAFKA_DLQ_TOPICS:example.created.dlq}
+
+    # ── SNS/SQS config (active when broker=sns) ─────────────────────────
+    # Uncomment and populate when switching to SNS/SQS.
+    # For local dev: start LocalStack (docker compose --profile sns up localstack)
+    # and set endpoint-override to http://localhost:4566.
+    #
+    # sqs:
+    #   queue-url: ${SQS_QUEUE_URL:http://localhost:4566/000000000000/example-created}
+    #   dlq-queue-url: ${SQS_DLQ_QUEUE_URL:http://localhost:4566/000000000000/example-created-dlq}
+    #   poll-interval-ms: ${SQS_POLL_INTERVAL_MS:1000}
+    #   dlq-poll-interval-ms: ${SQS_DLQ_POLL_INTERVAL_MS:5000}
+    #   region: ${AWS_REGION:us-east-1}
+    #   endpoint-override: ${SQS_ENDPOINT_OVERRIDE:}   # leave blank in production
+    # sns:
+    #   region: ${AWS_REGION:us-east-1}
+    #   endpoint-override: ${SNS_ENDPOINT_OVERRIDE:}   # leave blank in production
 
 server:
   port: ${PORT:8083}

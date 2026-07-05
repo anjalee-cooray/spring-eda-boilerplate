@@ -215,6 +215,92 @@ kafka-consumer-groups --bootstrap-server localhost:9092 \
   --reset-offsets --to-latest --execute
 ```
 
+#### DLQ — Kafka vs SNS/SQS comparison
+
+| Concern | Kafka | SNS/SQS |
+|---|---|---|
+| Who retries | Application (`DefaultErrorHandler`, 3×, exponential backoff) | AWS (re-delivers after `visibilityTimeout`; app extends timeout for backoff) |
+| Who routes to DLQ | Application (`DeadLetterPublishingRecoverer`) | AWS (Redrive Policy after `maxReceiveCount`) |
+| DLQ target | Kafka topic (`example.created.dlq`) | SQS queue (`example-created-dlq`) |
+| DLQ consumer | `DlqConsumer` — `@KafkaListener` | `SqsDlqConsumer` — `@Scheduled` poller |
+| Alert | Prometheus `events.dlq.received` counter | CloudWatch `ApproximateNumberOfMessagesVisible` + Prometheus counter |
+| Replay | `kafka-consumer-groups --reset-offsets` | AWS Console → "Start DLQ redrive" |
+| Config lives in | Java (`KafkaConsumerConfig`) | AWS infrastructure (Terraform Redrive Policy) |
+
+---
+
+### SNS/SQS DLQ handling
+
+When `EVENTS_BROKER=sns`, DLQ routing is handled at the AWS infrastructure level via the **Redrive Policy** configured on the source SQS queue:
+
+```
+Publisher (outbox-relay)
+  → SNS topic (example-created)
+    → SQS queue (example-created) ─── subscribed
+          │
+          │  consumer receives message
+          │  fails → does NOT delete → visibility timeout expires → re-delivered
+          │  fails again (maxReceiveCount times)
+          ▼
+    SQS DLQ (example-created-dlq)  ← AWS moves it automatically
+          │
+          │  SqsDlqConsumer polls every 5s
+          ▼
+    log at ERROR + increment events.dlq.received{queue=example-created-dlq}
+    delete from DLQ after logging
+```
+
+**Exponential backoff (application-level):**
+
+`SqsEventConsumer` calls `changeMessageVisibility` on failure to space out redeliveries:
+
+| Receive count | Visibility extension |
+|---|---|
+| 1st failure | 10 seconds |
+| 2nd failure | 30 seconds |
+| 3rd+ failure | 90 seconds |
+
+After `maxReceiveCount` (set to 3 on the queue Redrive Policy), AWS routes to DLQ regardless of visibility timeout.
+
+**LocalStack setup for local dev:**
+
+```bash
+# Start LocalStack
+make infra-sns
+
+# Create topics, queues, DLQs, and subscriptions
+make sns-setup
+
+# Switch a service to SNS/SQS — set in environment or .env
+EVENTS_BROKER=sns
+
+# Uncomment the sqs/sns blocks in the service's application.yml
+# and set endpoint-override: http://localhost:4566
+```
+
+**CloudWatch alarm (production):**
+
+```hcl
+resource "aws_cloudwatch_metric_alarm" "dlq_depth" {
+  alarm_name          = "example-created-dlq-depth"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  dimensions          = { QueueName = "example-created-dlq" }
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  period              = 60
+  statistic           = "Sum"
+}
+```
+
+**Operator runbook (SNS/SQS):**
+
+1. `SqsDlqConsumer` logs `DLQ message received` with `messageId`, `dlqQueue`, `receiveCount`, and full body
+2. Find the original handler error by searching logs for that `messageId`
+3. Code bug → fix the handler, redeploy, then replay via AWS Console: SQS → select DLQ → **Start DLQ redrive** → redrive to source queue
+4. Bad data → message is already deleted from DLQ by `SqsDlqConsumer` — no further action
+
 ---
 
 ### Event Choreography

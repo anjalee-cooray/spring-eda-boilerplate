@@ -319,6 +319,34 @@ services:
       db-migrations:
         condition: service_completed_successfully
 
+  # ── LocalStack (SNS/SQS local dev) ────────────────────────────────────────
+  # Only starts when the "sns" Compose profile is active:
+  #   docker compose --profile sns up localstack
+  #
+  # After starting, create queues and topics:
+  #   make sns-setup
+  #
+  # To switch all services to SNS/SQS, set EVENTS_BROKER=sns in each service
+  # and uncomment the sqs/sns config blocks in their application.yml files.
+  localstack:
+    image: localstack/localstack:3.0
+    container_name: eda-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: sns,sqs
+      DEFAULT_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - sns
+
 volumes:
   postgres_data:
   grafana_data:
