@@ -18,5 +18,8 @@ public enum SagaStatus {
     COMPENSATED,
 
     /** Saga ended in an unrecoverable error (compensation also failed). */
-    FAILED
+    FAILED,
+
+    /** Saga waited longer than app.saga.timeout-minutes without a response. */
+    TIMED_OUT
 }

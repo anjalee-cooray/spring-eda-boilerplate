@@ -121,9 +121,17 @@ public class SagaInstance {
         this.updatedAt = Instant.now();
     }
 
+    public void markTimedOut(String reason) {
+        this.status = SagaStatus.TIMED_OUT;
+        this.failureReason = reason;
+        this.completedAt = Instant.now();
+        this.updatedAt = Instant.now();
+    }
+
     public boolean isTerminal() {
         return status == SagaStatus.COMPLETED
                 || status == SagaStatus.COMPENSATED
-                || status == SagaStatus.FAILED;
+                || status == SagaStatus.FAILED
+                || status == SagaStatus.TIMED_OUT;
     }
 }
