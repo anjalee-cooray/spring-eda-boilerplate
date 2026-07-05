@@ -35,6 +35,9 @@ public class ReplayJob {
     @Column(name = "specific_ids", columnDefinition = "TEXT")
     private String specificIds;
 
+    @Column(name = "replay_source", nullable = false)
+    private String replaySource = "OUTBOX";
+
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false)
     private ReplayStatus status = ReplayStatus.PENDING;
@@ -76,6 +79,7 @@ public class ReplayJob {
                 ? String.join(",", request.specificIds().stream().map(UUID::toString).toList())
                 : null;
         job.requestedBy   = request.requestedBy();
+        job.replaySource  = request.source() != null ? request.source().name() : "OUTBOX";
         return job;
     }
 
@@ -111,6 +115,7 @@ public class ReplayJob {
     public int getReplayedCount()     { return replayedCount; }
     public String getErrorMessage()   { return errorMessage; }
     public String getRequestedBy()    { return requestedBy; }
+    public String getReplaySource()   { return replaySource; }
     public Instant getCreatedAt()     { return createdAt; }
     public Instant getStartedAt()     { return startedAt; }
     public Instant getCompletedAt()   { return completedAt; }

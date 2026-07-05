@@ -32,4 +32,23 @@ public interface EventStoreRepository extends JpaRepository<EventStoreRecord, UU
 
     /** Audit: find a single event by its stable business ID. */
     java.util.Optional<EventStoreRecord> findByEventId(UUID eventId);
+
+    /**
+     * Returns all events for a tenant matching optional filters, ordered oldest-first.
+     * Used by ReplayJobService when source=EVENT_STORE to rebuild read models.
+     */
+    @Query("""
+            SELECT e FROM EventStoreRecord e
+            WHERE e.tenantId   = :tenantId
+            AND   (:eventType  IS NULL OR e.eventType  = :eventType)
+            AND   (:from       IS NULL OR e.occurredAt >= :from)
+            AND   (:to         IS NULL OR e.occurredAt <= :to)
+            ORDER BY e.occurredAt ASC
+            """)
+    List<EventStoreRecord> findForReplay(
+            @Param("tenantId")  String  tenantId,
+            @Param("eventType") String  eventType,
+            @Param("from")      Instant from,
+            @Param("to")        Instant to
+    );
 }

@@ -1,5 +1,7 @@
 package com.example.eda.relay.replay;
 
+import com.example.eda.db.eventstore.EventStoreRecord;
+import com.example.eda.db.eventstore.EventStoreRepository;
 import com.example.eda.db.outbox.OutboxRecord;
 import com.example.eda.db.outbox.OutboxRepository;
 import com.example.eda.events.envelope.EventEnvelope;
@@ -46,6 +48,7 @@ public class ReplayJobService {
 
     private final ReplayJobRepository replayJobRepository;
     private final OutboxRepository outboxRepository;
+    private final EventStoreRepository eventStoreRepository;
     private final EventPublisher eventPublisher;
     private final ObjectMapper objectMapper;
     private final Counter replayedCounter;
@@ -53,13 +56,15 @@ public class ReplayJobService {
     public ReplayJobService(
             ReplayJobRepository replayJobRepository,
             OutboxRepository outboxRepository,
+            EventStoreRepository eventStoreRepository,
             EventPublisher eventPublisher,
             ObjectMapper objectMapper,
             MeterRegistry meterRegistry) {
-        this.replayJobRepository = replayJobRepository;
-        this.outboxRepository    = outboxRepository;
-        this.eventPublisher      = eventPublisher;
-        this.objectMapper        = objectMapper;
+        this.replayJobRepository  = replayJobRepository;
+        this.outboxRepository     = outboxRepository;
+        this.eventStoreRepository = eventStoreRepository;
+        this.eventPublisher       = eventPublisher;
+        this.objectMapper         = objectMapper;
         this.replayedCounter     = Counter.builder("replay.events.published")
                 .description("Total events re-published during replay jobs")
                 .register(meterRegistry);
@@ -83,11 +88,23 @@ public class ReplayJobService {
     /**
      * Executes the replay job in a background thread.
      * Called immediately after create() from ReplayController.
+     *
+     * When source=EVENT_STORE the job reads from the permanent event_store table —
+     * independent of broker retention windows. Use this for read-model rebuild after
+     * a projection bug or schema migration. Inbox deduplication still applies so
+     * consumers that already processed an event skip it silently.
      */
     @Async("replayExecutor")
     public void execute(UUID jobId) {
         ReplayJob job = replayJobRepository.findById(jobId)
                 .orElseThrow(() -> new IllegalArgumentException("Replay job not found: " + jobId));
+
+        boolean useEventStore = "EVENT_STORE".equals(job.getReplaySource());
+
+        if (useEventStore) {
+            executeFromEventStore(job);
+            return;
+        }
 
         List<OutboxRecord> records = resolveRecords(job);
 
@@ -118,6 +135,65 @@ public class ReplayJobService {
             job.markFailed(ex.getMessage());
             replayJobRepository.save(job);
             log.error("Replay job failed id={} replayedBeforeFailure={}", job.getId(), job.getReplayedCount(), ex);
+        }
+    }
+
+    private void executeFromEventStore(ReplayJob job) {
+        List<EventStoreRecord> records = eventStoreRepository.findForReplay(
+                job.getTenantId(),
+                job.getEventType(),
+                job.getFromTimestamp(),
+                job.getToTimestamp()
+        );
+
+        job.markRunning(records.size());
+        replayJobRepository.save(job);
+        log.info("Replay job (EVENT_STORE) started id={} totalEvents={}", job.getId(), records.size());
+
+        try {
+            for (EventStoreRecord record : records) {
+                publishEventStoreRecord(record);
+                job.incrementReplayed();
+                replayedCounter.increment();
+
+                if (job.getReplayedCount() % 100 == 0) {
+                    replayJobRepository.save(job);
+                    log.info("Replay progress id={} replayed={}/{}", job.getId(),
+                            job.getReplayedCount(), job.getTotalEvents());
+                }
+            }
+
+            job.markCompleted();
+            replayJobRepository.save(job);
+            log.info("Replay job (EVENT_STORE) completed id={} totalReplayed={}", job.getId(), job.getReplayedCount());
+
+        } catch (Exception ex) {
+            job.markFailed(ex.getMessage());
+            replayJobRepository.save(job);
+            log.error("Replay job (EVENT_STORE) failed id={} replayedBeforeFailure={}", job.getId(), job.getReplayedCount(), ex);
+        }
+    }
+
+    private void publishEventStoreRecord(EventStoreRecord record) {
+        try {
+            Object payload = objectMapper.readValue(record.getPayload(), Object.class);
+            EventEnvelope envelope = new EventEnvelope(
+                    record.getEventId(),
+                    record.getEventType(),
+                    record.getTenantId(),
+                    record.getCorrelationId() != null ? record.getCorrelationId() : record.getEventId().toString(),
+                    record.getCausationId(),
+                    record.getOccurredAt(),
+                    payload,
+                    record.getSchemaVersion(),
+                    record.getAggregateId()
+            );
+            eventPublisher.publish(envelope);
+            log.debug("Replayed event-store record eventId={} eventType={} tenantId={}",
+                    record.getEventId(), record.getEventType(), record.getTenantId());
+        } catch (Exception ex) {
+            log.error("Failed to replay event-store record eventId={} eventType={}", record.getEventId(), record.getEventType(), ex);
+            throw new RuntimeException("Failed to publish event-store record " + record.getEventId(), ex);
         }
     }
 

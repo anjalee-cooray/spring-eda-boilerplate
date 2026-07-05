@@ -25,6 +25,9 @@ import java.util.UUID;
  *
  *   Replay specific outbox records by ID:
  *     { tenantId: "t1", specificIds: ["uuid1", "uuid2"], requestedBy: "ops" }
+ *
+ *   Read-model rebuild from permanent event log (not bounded by broker retention):
+ *     { tenantId: "t1", source: "EVENT_STORE", eventType: "example.created", requestedBy: "ops" }
  */
 public record ReplayRequest(
         String tenantId,
@@ -32,14 +35,25 @@ public record ReplayRequest(
         Instant fromTimestamp,
         Instant toTimestamp,
         List<UUID> specificIds,
-        String requestedBy
+        String requestedBy,
+        ReplaySource source
 ) {
+    public enum ReplaySource {
+        /** Re-publish PUBLISHED rows from outbox_records — default. */
+        OUTBOX,
+        /** Re-publish from event_store (permanent log) — use for read-model rebuild. */
+        EVENT_STORE
+    }
+
     public ReplayRequest {
         if (tenantId == null || tenantId.isBlank()) {
             throw new IllegalArgumentException("tenantId is required");
         }
         if (requestedBy == null || requestedBy.isBlank()) {
             throw new IllegalArgumentException("requestedBy is required");
+        }
+        if (source == null) {
+            source = ReplaySource.OUTBOX;
         }
     }
 }
