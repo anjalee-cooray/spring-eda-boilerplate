@@ -49,7 +49,7 @@ public class SnsEventPublisher implements EventPublisher {
         schemaRegistry.ifPresent(r -> r.validate(envelope));
         String payload = serialize(envelope);
 
-        PublishRequest request = PublishRequest.builder()
+        PublishRequest.Builder requestBuilder = PublishRequest.builder()
                 .topicArn(destination)
                 .message(payload)
                 .messageAttributes(Map.of(
@@ -65,18 +65,54 @@ public class SnsEventPublisher implements EventPublisher {
                             .dataType("String")
                             .stringValue(envelope.schemaVersion())
                             .build()
-                ))
-                .build();
+                ));
+
+        // FIFO topics (ARN ends with ".fifo") require MessageGroupId for per-entity ordering
+        // and support MessageDeduplicationId to deduplicate retried publishes within a 5-minute window.
+        //
+        //   MessageGroupId       = tenantId:aggregateId  → all events for the same entity land in the
+        //                          same FIFO group, guaranteeing delivery order (mirrors Kafka partition key).
+        //                          Falls back to tenantId when aggregateId is not set.
+        //
+        //   MessageDeduplicationId = eventId             → SNS deduplicates within a 5-minute window.
+        //                          If the relay publishes the same event_id twice (crash between Phase 2
+        //                          and Phase 3), SNS silently drops the second copy at the broker.
+        //
+        // Standard topics do not support these fields — passing them causes an error.
+        if (isFifoTopic(destination)) {
+            requestBuilder
+                    .messageGroupId(partitionKey(envelope))
+                    .messageDeduplicationId(envelope.eventId().toString());
+        }
+
+        PublishRequest request = requestBuilder.build();
 
         try {
             snsClient.publish(request);
-            log.debug("Published event type={} eventId={} schemaVersion={} to topicArn={}",
-                    envelope.eventType(), envelope.eventId(), envelope.schemaVersion(), destination);
+            log.debug("Published event type={} eventId={} schemaVersion={} fifo={} to topicArn={}",
+                    envelope.eventType(), envelope.eventId(), envelope.schemaVersion(),
+                    isFifoTopic(destination), destination);
         } catch (Exception ex) {
             log.error("Failed to publish event type={} eventId={} to topicArn={}",
                     envelope.eventType(), envelope.eventId(), destination, ex);
             throw ex;
         }
+    }
+
+    /**
+     * Returns the SNS/SQS FIFO partition key — mirrors KafkaEventPublisher.partitionKey().
+     * All events for the same entity share a MessageGroupId → FIFO delivery order guaranteed.
+     */
+    private String partitionKey(EventEnvelope envelope) {
+        if (envelope.aggregateId() != null && !envelope.aggregateId().isBlank()) {
+            return envelope.tenantId() + ":" + envelope.aggregateId();
+        }
+        return envelope.tenantId();
+    }
+
+    /** SNS FIFO topic ARNs always end with ".fifo". Standard topics do not. */
+    private boolean isFifoTopic(String topicArn) {
+        return topicArn != null && topicArn.endsWith(".fifo");
     }
 
     private String serialize(EventEnvelope envelope) {
