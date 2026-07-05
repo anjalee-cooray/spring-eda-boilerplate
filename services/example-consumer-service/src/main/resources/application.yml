@@ -63,6 +63,11 @@ app:
 
 server:
   port: ${PORT:8083}
+  shutdown: graceful
+
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
 
 app:
   kafka:

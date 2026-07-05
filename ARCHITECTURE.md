@@ -1700,6 +1700,58 @@ The replay API was previously annotated as "internal — restrict via VPC or mTL
 
 ---
 
+## Graceful Shutdown
+
+All services use Spring Boot's built-in graceful shutdown (`server.shutdown: graceful`) combined with service-specific `SmartLifecycle` beans to drain in-flight work before the application context closes.
+
+### Spring Boot graceful HTTP shutdown
+
+`server.shutdown: graceful` causes the embedded Tomcat / Netty to:
+1. Stop accepting new HTTP connections on SIGTERM
+2. Drain in-flight requests within `spring.lifecycle.timeout-per-shutdown-phase` (30 s)
+3. Then allow the rest of the context to close
+
+All services set this to 30 s via the `SHUTDOWN_TIMEOUT` env var.
+
+### Outbox relay — `OutboxRelayShutdownCoordinator`
+
+The relay's `@Scheduled` poller cannot be drained by the HTTP shutdown hook because it does not process HTTP requests. `OutboxRelayShutdownCoordinator` implements `SmartLifecycle` at phase `Integer.MAX_VALUE - 100`:
+
+```
+SIGTERM
+  → OutboxRelayShutdownCoordinator.stop()
+      → pollingEnabled = false
+      → OutboxRelayPoller.poll() returns early on next tick (no new claim)
+      → in-progress batch finishes (Phase 2 + Phase 3 complete normally)
+  → datasource, Kafka producer close
+```
+
+`OutboxRelayPoller.poll()` checks `shutdownCoordinator.isPollingEnabled()` at the top — if shutdown is signalled, it skips claiming a new batch. Any batch already mid-flight completes because the datasource and Kafka producer are still live (they close in a later phase).
+
+### Kafka consumers — `KafkaConsumerShutdownHandler`
+
+`KafkaConsumerShutdownHandler` implements `SmartLifecycle` at phase `Integer.MAX_VALUE - 50` (higher than the coordinator, so it stops first):
+
+```
+SIGTERM
+  → KafkaConsumerShutdownHandler.stop()
+      → KafkaListenerEndpointRegistry.stop()
+          → all @KafkaListener containers pause, finish current message
+  → datasource, outbox writer close
+```
+
+This prevents the datasource from being torn down while a listener is mid-saga-step, which would cause a transaction rollback and force a retry on the next consumer restart.
+
+### Shutdown phase ordering
+
+| Bean | Phase | When stop() fires |
+|---|---|---|
+| `KafkaConsumerShutdownHandler` | `MAX_VALUE - 50` | First — stops Kafka polling |
+| `OutboxRelayShutdownCoordinator` | `MAX_VALUE - 100` | Second — stops outbox polling |
+| Spring infrastructure (datasource, Kafka) | lower phases | Last |
+
+---
+
 ## Local verification guide
 
 ### Start the stack

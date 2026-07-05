@@ -52,6 +52,11 @@ app:
 
 server:
   port: ${PORT:8081}
+  shutdown: graceful
+
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
 
 management:
   endpoints:

@@ -61,6 +61,7 @@ public class OutboxRelayPoller {
     private final OutboxRepository outboxRepository;
     private final EventPublisher eventPublisher;
     private final ObjectMapper objectMapper;
+    private final OutboxRelayShutdownCoordinator shutdownCoordinator;
     private final Counter publishedCounter;
     private final Counter failedCounter;
 
@@ -78,11 +79,13 @@ public class OutboxRelayPoller {
             OutboxRepository outboxRepository,
             EventPublisher eventPublisher,
             ObjectMapper objectMapper,
+            OutboxRelayShutdownCoordinator shutdownCoordinator,
             MeterRegistry meterRegistry) {
         this.claimService = claimService;
         this.outboxRepository = outboxRepository;
         this.eventPublisher = eventPublisher;
         this.objectMapper = objectMapper;
+        this.shutdownCoordinator = shutdownCoordinator;
 
         this.publishedCounter = Counter.builder("outbox.relay.published")
                 .description("Total events successfully published by the outbox relay")
@@ -101,6 +104,11 @@ public class OutboxRelayPoller {
 
     @Scheduled(fixedDelayString = "${app.relay.poll-interval-ms:1000}")
     public void poll() {
+        if (!shutdownCoordinator.isPollingEnabled()) {
+            log.debug("Outbox polling skipped — shutdown in progress");
+            return;
+        }
+
         Duration lockTimeout = Duration.ofSeconds(lockTimeoutSeconds);
 
         // Phase 1: claim — commits before Phase 2 begins
