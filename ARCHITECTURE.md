@@ -1162,6 +1162,91 @@ make sns-setup        # create topics, queues, DLQs, subscription
 
 ---
 
+## Saga Orchestration
+
+### Choreography vs Orchestration
+
+The boilerplate ships with **choreography** as the default pattern: each service reacts to events independently, with no central coordinator. This works well for simple flows.
+
+For complex flows, **saga orchestration** is the right tool:
+
+| Signal | Use choreography | Use orchestration |
+|---|---|---|
+| Steps | 1–2 | 3+ across multiple services |
+| Compensation | Not needed | Required (rollback on failure) |
+| Branching | None | Conditional paths |
+| Visibility | Hard to trace | Saga status in DB |
+| Coupling | Fully decoupled | Orchestrator knows participants |
+
+### DB-backed saga orchestrator (no external service required)
+
+The boilerplate provides a lightweight, DB-backed saga orchestrator. It does not require Temporal, Axon, or Conductor — it uses the existing Transactional Outbox and the `saga_instances` table.
+
+**Key properties:**
+- **Crash-safe** — all state transitions write to `saga_instances` in the same transaction as the next outbox record. Crash before commit → both are rolled back. Crash after commit → next response event reloads the saga from DB by `correlation_id`.
+- **Idempotent** — duplicate response events are ignored (saga checks current step + terminal status).
+- **Auditable** — the full saga lifecycle (step transitions, failure reason) is visible in `saga_instances`.
+
+### Flow: ExampleBookingSaga
+
+```
+Trigger: booking.requested
+  │
+  ├─ saga created (STARTED)
+  ├─ outbox: booking.inventory.reserve
+  │
+  ▼ AWAITING_INVENTORY
+  ├─ booking.inventory.confirmed ──► AWAITING_PAYMENT
+  │    └─ outbox: booking.payment.charge
+  │         ├─ booking.payment.confirmed ──► COMPLETED
+  │         └─ booking.payment.failed   ──► COMPENSATING
+  │              └─ outbox: booking.inventory.release
+  │                   └─ booking.inventory.released ──► COMPENSATED
+  │
+  └─ booking.inventory.failed ──► COMPENSATED (nothing to undo)
+```
+
+### Crash safety guarantee
+
+```
+handle(booking.inventory.confirmed) {
+    @Transactional {
+        saga.advanceTo(AWAITING_PAYMENT)           // ─┐ same transaction
+        sagaRepository.save(saga)                  //  │
+        outboxWriter.write(payment.charge, ...)    // ─┘ commit or rollback together
+    }
+}
+```
+
+If the service crashes between the transaction commit and the broker publish:
+- The outbox record is `PENDING` — the outbox relay re-publishes it
+- The `payment.charge` event arrives at the payment participant
+- The saga is in `AWAITING_PAYMENT` state — ready to handle the response
+
+### saga_instances table
+
+| Column | Purpose |
+|---|---|
+| `correlation_id` | Links all events in one saga run |
+| `status` | `STARTED` / `RUNNING` / `COMPLETED` / `COMPENSATING` / `COMPENSATED` / `FAILED` |
+| `current_step` | Step name the saga is currently waiting on |
+| `context` | JSONB — saga-specific fields available at every step |
+| `compensation_step_index` | Tracks progress through compensation steps |
+| `failure_reason` | Last error recorded when entering COMPENSATING or FAILED |
+
+### How to add a new saga
+
+1. Define event type constants (trigger + step responses + compensation responses)
+2. Create a class implementing `EventConsumer` — see `ExampleBookingSaga` for the template
+3. In `start()`: create `SagaInstance`, write first command to outbox, save — all in one `@Transactional`
+4. In `handle()`: switch on `eventType`, load saga by `correlationId`, run the step handler
+5. Each step handler: update saga state + write next command to outbox in one `@Transactional`
+6. Compensation handlers mirror the same pattern in reverse
+
+For flows with 10+ steps, external system calls (HTTP/gRPC), or distributed timeouts, consider **Temporal** (Java SDK available) — it provides durable execution, retry policies, and activity timeouts out of the box.
+
+---
+
 ## Local verification guide
 
 ### Start the stack
