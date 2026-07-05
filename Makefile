@@ -1,4 +1,4 @@
-.PHONY: up down infra build migrate logs ps clean new-schema integration-test rebuild
+.PHONY: up down infra build migrate logs ps clean new-schema integration-test rebuild set-quota
 
 # Start the full local stack
 up:
@@ -91,6 +91,13 @@ new-schema:
 # Requires Docker running. First run pulls container images (~1-2 min).
 integration-test:
 	./gradlew integrationTest
+
+# ── Tenant quota management ──────────────────────────────────────────────────
+# Apply a tier preset for a tenant. Tier: FREE (1k/day) | PRO (10k/day) | ENTERPRISE (unlimited)
+# Usage: make set-quota TENANT=tenant-1 TIER=PRO
+set-quota:
+	curl -s -X PUT http://localhost:9080/admin/quotas/$(TENANT)/tier/$(TIER) \
+	  -H "Authorization: Bearer $${JWT_TOKEN}" | jq
 
 # ── Read model rebuild ────────────────────────────────────────────────────────
 # Trigger a read-model rebuild for a specific projection and tenant.
