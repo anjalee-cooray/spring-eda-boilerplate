@@ -8,4 +8,7 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-oauth2-resource-server'
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-aop'
+
+    // spring-cloud-context provides ContextRefresher for @RefreshScope secret rotation
+    compileOnly 'org.springframework.cloud:spring-cloud-context'
 }
