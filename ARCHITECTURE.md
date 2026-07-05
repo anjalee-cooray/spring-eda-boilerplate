@@ -13,26 +13,29 @@ Browser / Client
       │
       │ HTTPS + JWT
       ▼
-┌─────────────────────────────────────────────────────┐
-│                    api-gateway :9080                 │
-│  - Validates JWT signature against OIDC issuer       │
-│  - Extracts tenant_id from JWT claim                 │
-│  - Forwards X-Tenant-Id + X-Correlation-Id headers  │
-│  - Rate limiting via Redis                           │
-└──────────────┬───────────────────┬──────────────────┘
-               │ HTTP              │ HTTP
-               ▼                   ▼
-   ┌───────────────────┐  ┌─────────────────────┐
-   │  command-service  │  │   query-service      │
-   │  :8081            │  │   :8082              │
-   │                   │  │                      │
-   │  POST /commands/* │  │  GET /queries/*      │
-   │  PUT  /commands/* │  │                      │
-   │  DELETE /commands │  │  Reads from          │
-   │                   │  │  example_read_models │
-   │  Writes to        │  │  (never touches      │
-   │  example_entities │  │   write DB tables)   │
-   └────────┬──────────┘  └──────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                       api-gateway :9080                          │
+│  - Validates JWT signature against OIDC issuer                   │
+│  - Extracts tenant_id from JWT claim                             │
+│  - Forwards X-Tenant-Id + X-Correlation-Id headers              │
+│  - Rate limiting (Redis token bucket, per tenant)               │
+│  - HTTP idempotency (Redis dedup, Idempotency-Key header)        │
+│  - Circuit breaker + retry on downstream routes                  │
+└──────────────┬───────────────────────┬──────────────────────────┘
+               │ HTTP                  │ HTTP
+               ▼                       ▼
+   ┌───────────────────┐    ┌─────────────────────┐
+   │  command-service  │    │   query-service      │
+   │  :8081            │    │   :8082              │
+   │  CQRS write side  │    │   CQRS read side     │
+   │                   │    │                      │
+   │  POST /commands/* │    │  GET /queries/*      │
+   │  PUT  /commands/* │    │                      │
+   │  DELETE /commands │    │  Reads from          │
+   │                   │    │  example_read_models │
+   │  Writes to        │    │  (never touches      │
+   │  example_entities │    │   write DB tables)   │
+   └────────┬──────────┘    └──────────────────────┘
             │
             │ Same DB transaction
             ▼
@@ -46,20 +49,42 @@ Browser / Client
    │   outbox-relay    │
    │   :8084           │
    └────────┬──────────┘
-            │ publishes event
+            │ publishes via EventPublisher
             ▼
-   ┌────────────────────────────────────────────────┐
-   │                  Kafka topic                   │
-   └──────────┬───────────────────┬─────────────────┘
-              │                   │
-              ▼                   ▼
-   ┌──────────────────┐  ┌──────────────────────────┐
-   │  query-service   │  │   consumer-service :8083  │
-   │  ExampleProjector│  │   ExampleCreatedHandler   │
-   │  → updates       │  │   → side effects          │
-   │  read model      │  │   (notifications, etc)    │
-   └──────────────────┘  └──────────────────────────┘
+   ┌──────────────────────────────────────────────────────────────┐
+   │            Message broker (pluggable — one env var)          │
+   │                                                              │
+   │  EVENTS_BROKER=kafka (default, local dev)                    │
+   │    Kafka topic per event type                                │
+   │    DLQ: {topic}.dlq topic                                    │
+   │    Retry: DefaultErrorHandler (3×, exponential backoff)      │
+   │                                                              │
+   │  EVENTS_BROKER=sns (AWS production)                          │
+   │    SNS topic → SQS queue per consumer service               │
+   │    DLQ: SQS Redrive Policy → separate DLQ queue             │
+   │    Retry: SQS re-delivery + changeMessageVisibility backoff  │
+   └──────────┬──────────────────────────┬───────────────────────┘
+              │                          │
+              ▼                          ▼
+   ┌──────────────────┐      ┌──────────────────────────┐
+   │  query-service   │      │   consumer-service :8083  │
+   │  ExampleProjector│      │   ExampleCreatedHandler   │
+   │  → updates       │      │   → side effects          │
+   │  read model      │      │   (notifications, etc)    │
+   │                  │      │                           │
+   │                  │      │  DlqConsumer / SqsDlqConsumer
+   │                  │      │  → logs + metrics on DLQ  │
+   └──────────────────┘      └──────────────────────────┘
 ```
+
+### Broker selection
+
+Switch the entire messaging layer with one environment variable — no code changes:
+
+| `EVENTS_BROKER` | Publisher | Consumer | DLQ mechanism | Local dev |
+|---|---|---|---|---|
+| `kafka` (default) | `KafkaEventPublisher` | `KafkaEventConsumer` + `DefaultErrorHandler` | `{topic}.dlq` Kafka topic | Kafka in Docker Compose |
+| `sns` | `SnsEventPublisher` | `SqsEventConsumer` + `changeMessageVisibility` | SQS Redrive Policy | LocalStack (`make infra-sns`) |
 
 ---
 
@@ -560,10 +585,12 @@ SELECT * FROM example_entities WHERE tenant_id = 'tenant-1';
          occurred_at:    timestamp,
          payload:        {id, name, tenantId}
        }
-   - Publishes to Kafka
+   - Publishes via EventPublisher (broker-agnostic):
+       EVENTS_BROKER=kafka → KafkaEventPublisher → Kafka topic "example.created"
+       EVENTS_BROKER=sns   → SnsEventPublisher   → SNS topic → SQS queue per consumer
    - UPDATE outbox_records SET status='PUBLISHED'
 
-8. Kafka delivers to all consumer groups simultaneously:
+8. Broker delivers to all consumer groups simultaneously:
 
    ┌─ query-service — ExampleProjector
    │    - supports("example.created") → true
@@ -872,9 +899,128 @@ Each shared library is a Spring Boot auto-configuration module — services incl
 | `shared-telemetry` | OTel span → MDC bridge, virtual thread metrics | `TracingMdcSpanHandler`, `VirtualThreadMetrics` |
 | `shared-security` | JWT resource server, tenant context filter | `TenantContextFilter`, `TenantContextHolder`, `SecurityAutoConfiguration` |
 | `shared-db` | RLS interceptor, outbox writer, inbox deduplicator | `RlsDataSourceInterceptor`, `OutboxWriter`, `InboxDeduplicator` |
-| `shared-events` | Event publisher (Kafka or SNS/SQS), no-op fallback | `KafkaEventPublisher`, `SnsEventPublisher`, `NoOpEventPublisher` |
+| `shared-events` | Event publisher + consumer (Kafka or SNS/SQS), DLQ handling, no-op fallback | `KafkaEventPublisher`, `KafkaEventConsumer`, `KafkaConsumerConfig` (retry + DLQ routing), `SnsEventPublisher`, `SqsEventConsumer` (backoff), `SqsDlqConsumer`, `SqsClientConfig`, `NoOpEventPublisher` |
 | `shared-payments` | Stripe payment gateway with circuit breaker + retry, webhook verifier | `StripePaymentGateway`, `StripeWebhookVerifier` |
 | `shared-resilience` | Circuit breaker + retry auto-config, Micrometer metrics binding, default configs | `ResilienceAutoConfiguration` |
+
+---
+
+## Switching brokers — Kafka vs SNS/SQS
+
+### Kafka (default — local dev and self-hosted)
+
+No extra config needed. Kafka starts with `make infra`. All services default to `EVENTS_BROKER=kafka`.
+
+```
+outbox-relay → KafkaEventPublisher → Kafka topic
+                                          │
+                   ┌──────────────────────┤
+                   ▼                      ▼
+         KafkaEventConsumer          KafkaEventConsumer
+         (query-service)             (consumer-service)
+               │                          │
+               │ on failure:              │ on failure:
+               │ DefaultErrorHandler      │ DefaultErrorHandler
+               │ 3× exponential backoff   │ 3× exponential backoff
+               ▼                          ▼
+         example.created.dlq        example.created.dlq
+               │                          │
+               ▼                          ▼
+         DlqConsumer                DlqConsumer
+         (logs + metric)            (logs + metric)
+```
+
+### SNS/SQS (AWS production)
+
+**Infrastructure prerequisites** (Terraform in `terraform-eda-boilerplate`):
+
+```hcl
+# One SNS topic per event type
+resource "aws_sns_topic" "example_created" { name = "example-created" }
+
+# One SQS queue + DLQ per consumer service
+resource "aws_sqs_queue" "example_created_dlq" {
+  name                      = "example-created-dlq"
+  message_retention_seconds = 1209600  # 14 days
+}
+
+resource "aws_sqs_queue" "example_created" {
+  name                       = "example-created"
+  visibility_timeout_seconds = 90  # must be >= max backoff (90s)
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.example_created_dlq.arn
+    maxReceiveCount     = 3
+  })
+}
+
+# Subscribe the SQS queue to the SNS topic
+resource "aws_sns_topic_subscription" "example_created" {
+  topic_arn = aws_sns_topic.example_created.arn
+  protocol  = "sqs"
+  endpoint  = aws_sqs_queue.example_created.arn
+}
+```
+
+**Service config** — set per service (env var or `application.yml`):
+
+```bash
+EVENTS_BROKER=sns
+
+# outbox-relay and command-service (publishers)
+SNS_TOPIC_EXAMPLE_CREATED=arn:aws:sns:us-east-1:123456789:example-created
+AWS_REGION=us-east-1
+
+# consumer-service and query-service (consumers)
+SQS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789/example-created
+SQS_DLQ_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789/example-created-dlq
+AWS_REGION=us-east-1
+```
+
+Uncomment the `sqs`/`sns` blocks in each service's `application.yml`.
+
+**Credentials** — no explicit config needed in production. The AWS SDK resolves from ECS task role or EC2 instance role automatically. For local dev with LocalStack:
+
+```bash
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+SQS_ENDPOINT_OVERRIDE=http://localhost:4566
+SNS_ENDPOINT_OVERRIDE=http://localhost:4566
+```
+
+**Message flow (SNS/SQS):**
+
+```
+outbox-relay → SnsEventPublisher → SNS topic (example-created)
+                                         │
+                          ┌──────────────┤ fan-out
+                          ▼              ▼
+               SQS queue             SQS queue
+               (query-service)       (consumer-service)
+                    │                     │
+                    │ SqsEventConsumer     │ SqsEventConsumer
+                    │ polls every 1s       │ polls every 1s
+                    │                     │
+                    │ on failure:          │ on failure:
+                    │ changeMessageVisibility (10s/30s/90s backoff)
+                    │ after maxReceiveCount=3:
+                    ▼                     ▼
+               SQS DLQ               SQS DLQ
+               (example-created-dlq) (example-created-dlq)
+                    │                     │
+                    ▼                     ▼
+               SqsDlqConsumer        SqsDlqConsumer
+               polls every 5s        polls every 5s
+               logs + metric         logs + metric
+               deletes from DLQ      deletes from DLQ
+```
+
+**Local dev with LocalStack:**
+
+```bash
+make infra-sns        # start LocalStack
+make sns-setup        # create topics, queues, DLQs, subscription
+# then set EVENTS_BROKER=sns and endpoint overrides in .env
+```
 
 ---
 
