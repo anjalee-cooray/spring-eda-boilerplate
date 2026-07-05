@@ -90,4 +90,11 @@ public interface OutboxRepository extends JpaRepository<OutboxRecord, UUID> {
      * Returned in DB natural order — caller sorts if ordering matters.
      */
     List<OutboxRecord> findAllByIdIn(List<UUID> ids);
+
+    /**
+     * Counts outbox records for a tenant created on or after a given timestamp.
+     * Used by TenantQuotaEnforcer to measure today's write volume at domain level.
+     * The (tenant_id, created_at) index makes this O(log N).
+     */
+    long countByTenantIdAndCreatedAtAfter(String tenantId, java.time.Instant createdAt);
 }
