@@ -81,10 +81,18 @@ Browser / Client
 
 Switch the entire messaging layer with one environment variable — no code changes:
 
-| `EVENTS_BROKER` | Publisher | Consumer | DLQ mechanism | Local dev |
-|---|---|---|---|---|
-| `kafka` (default) | `KafkaEventPublisher` | `KafkaEventConsumer` + `DefaultErrorHandler` | `{topic}.dlq` Kafka topic | Kafka in Docker Compose |
-| `sns` | `SnsEventPublisher` | `SqsEventConsumer` + `changeMessageVisibility` | SQS Redrive Policy | LocalStack (`make infra-sns`) |
+| Feature | Kafka (`EVENTS_BROKER=kafka`) | SNS/SQS (`EVENTS_BROKER=sns`) |
+|---|---|---|
+| Publisher | `KafkaEventPublisher` | `SnsEventPublisher` |
+| Consumer | `KafkaEventConsumer` + `DefaultErrorHandler` | `SqsEventConsumer` + `changeMessageVisibility` backoff |
+| DLQ routing | `DeadLetterPublishingRecoverer` → `{topic}.dlq` Kafka topic | SQS Redrive Policy → DLQ queue (infra-level); non-retryable exceptions write to DLQ directly |
+| Retry strategy | In-process exponential backoff (3 attempts: 1s→2s→4s); non-retryable bypasses retries | SQS re-delivery via visibility timeout (10s→30s→90s); non-retryable deletes + routes to DLQ |
+| Per-entity ordering | Partition key = `tenantId:aggregateId` | `MessageGroupId = tenantId:aggregateId` on FIFO topics |
+| Broker-level dedup | `enable.idempotence=true` (sequence numbers, broker deduplicates retried produces) | `MessageDeduplicationId = eventId` on FIFO topics (5-min window) |
+| Consumer lag metric | `kafka.consumer.lag{group,topic,partition}` via AdminClient | `sqs.consumer.lag{queue,type}` via `GetQueueAttributes`; CloudWatch alarm as secondary |
+| Backpressure | `KafkaBackpressureController` pauses `KafkaListenerContainers` | `SqsBackpressureController` sets `isPaused`; `SqsEventConsumer.poll()` skips receive |
+| Non-retryable exceptions | `addNotRetryableExceptions(IllegalArgumentException, ...)` — straight to DLQ | `isNonRetryable()` cause-chain check — writes to DLQ queue + deletes from source |
+| Local dev | Kafka in Docker Compose | LocalStack (`make infra-sns`) |
 
 ---
 
@@ -1228,15 +1236,31 @@ Lag = `latestOffset - committedOffset` per partition. A lag of 0 means the consu
 kafka_consumer_lag{group="example-consumer-service"} > 1000
 ```
 
-This component only activates when `app.events.broker=kafka`. For SNS/SQS, use the CloudWatch `ApproximateNumberOfMessagesVisible` metric on the SQS queue instead.
+This component only activates when `app.events.broker=kafka`.
 
-### SNS/SQS equivalent
+### SNS/SQS equivalent — SqsConsumerLagMetrics
 
-For SNS/SQS consumers, the per-handler offset tracking (Layer 1) works identically — `ConsumerHealthTracker` is broker-agnostic. For queue depth lag, use:
+`SqsConsumerLagMetrics` (`shared/shared-events`) provides the same capability for the SNS/SQS path. It polls `SqsClient.getQueueAttributes()` on a schedule and registers two Micrometer gauges:
+
 ```
-CloudWatch → SQS → ApproximateNumberOfMessagesVisible
+sqs.consumer.lag{queue=example-created,   type=source}  — visible + in-flight messages
+sqs.consumer.lag{queue=example-created-dlq, type=dlq}   — DLQ depth (non-zero = operator action needed)
 ```
-or query LocalStack for local dev:
+
+`getMaxDepth()` returns the source queue depth — used by `SqsBackpressureController`.
+
+Per-handler staleness (`consumer.lag.seconds`) works identically on both paths — `ConsumerHealthTracker` is broker-agnostic. The Prometheus alert `ConsumerStale` fires for both Kafka and SNS/SQS.
+
+**CloudWatch as a secondary alarm** (recommended for production):
+```
+Metric:    AWS/SQS ApproximateNumberOfMessagesVisible
+QueueName: example-created
+Threshold: > 10000 for 5 consecutive minutes
+Action:    SNS → PagerDuty / OpsGenie
+```
+This fires even when the consumer service is down — it complements `sqs.consumer.lag` but does not replace it.
+
+For local dev with LocalStack:
 ```bash
 aws --endpoint-url=http://localhost:4566 sqs get-queue-attributes \
   --queue-url <url> \
@@ -1455,18 +1479,28 @@ When `aggregateId` is `null` (or the older two-arg `write` overloads are used), 
 
 The `aggregate_id` column is persisted in `outbox_records` (V012 migration). The relay reads it and passes it through to `EventEnvelope.aggregateId()`. `KafkaEventPublisher` then uses it as the Kafka message key. The key is also preserved during **replay** (`ReplayJobService` reads `record.getAggregateId()`) so replayed events land on the same partition as the originals.
 
-### SNS/SQS equivalent
+### SNS/SQS equivalent — FIFO topics
 
-SNS does not have partition keys. SQS FIFO queues use a `MessageGroupId` for per-group ordering — set `MessageGroupId = tenantId + ":" + aggregateId` in `SnsEventPublisher.publish()` when using the FIFO variant.
+`SnsEventPublisher` automatically detects FIFO topics by checking whether the topic ARN ends with `.fifo`. For FIFO topics it sets:
+
+```
+MessageGroupId = tenantId + ":" + aggregateId   (when aggregateId is set)
+MessageGroupId = tenantId                        (fallback for non-entity events)
+```
+
+All events with the same `MessageGroupId` are delivered in FIFO order within an SQS FIFO queue — the direct equivalent of Kafka partition ordering. Standard SNS topics do not support `MessageGroupId` and deliver without ordering guarantees.
+
+**Infrastructure requirement:** Use SNS FIFO topics (ARN suffix `.fifo`) and SQS FIFO queues for event types where per-entity ordering matters.
 
 ### Trade-offs
 
 | Decision | Rationale |
 |---|---|
-| `tenantId:aggregateId` composite key | Prevents cross-tenant partition collisions |
+| `tenantId:aggregateId` composite key | Prevents cross-tenant partition/group collisions — on both Kafka and SNS FIFO |
 | Null → tenant-level fallback | Backward compatible with pre-V012 events |
-| Stored in `outbox_records.aggregate_id` | Relay and replay both use the same key — consistent routing |
-| Not enforced for SNS standard topics | SNS does not support partitioning; per-entity ordering is a Kafka-specific guarantee |
+| Stored in `outbox_records.aggregate_id` | Relay and replay both use the same key — consistent routing on re-delivery |
+| FIFO detected by ARN suffix | No extra config; ARN convention (`*.fifo`) is deterministic |
+| Standard topics → no ordering | Standard SNS/SQS cannot provide ordering; FIFO topics are required |
 
 ---
 
@@ -1478,7 +1512,7 @@ The boilerplate provides a three-layer deduplication chain to prevent the same e
 
 `outbox_records.event_id` has a `UNIQUE` constraint (V002). Attempting to insert two outbox records with the same `event_id` fails at the database level. Because `OutboxWriter.write()` generates a fresh `UUID.randomUUID()` per call, this prevents duplicate entries from concurrent writes in the same request.
 
-### Layer 2 — Kafka idempotent producer (broker level)
+### Layer 2a — Kafka idempotent producer (broker level, Kafka path)
 
 With `enable.idempotence=true` and `acks=all`, Kafka assigns each producer a **producer ID** and a **sequence number** per partition. If the broker receives two `ProduceRequest` calls with the same sequence number (e.g. after a network timeout and retry), it deduplicates at the broker and acknowledges only once. This prevents the relay from publishing the same message twice during transient network failures.
 
@@ -1493,6 +1527,12 @@ spring:
         enable.idempotence: true
         max.in.flight.requests.per.connection: 5   # max allowed with idempotence=true
 ```
+
+### Layer 2b — SNS FIFO MessageDeduplicationId (broker level, SNS/SQS path)
+
+For SNS FIFO topics, `SnsEventPublisher` sets `MessageDeduplicationId = eventId.toString()` on every `PublishRequest`. SNS FIFO deduplicates messages with the same deduplication ID within a **5-minute window** — if the outbox relay publishes the same `event_id` twice (crash between Phase 2 and Phase 3), the second copy is silently discarded at the SNS broker.
+
+This is the SNS/SQS equivalent of `enable.idempotence=true`. Standard SNS topics do not support `MessageDeduplicationId` and have no broker-level deduplication guarantee — the consumer `inbox_records` (Layer 3) remains the sole safety net on the standard path.
 
 ### Layer 3 — Consumer inbox deduplication (application level)
 
@@ -1568,29 +1608,53 @@ spring:
 
 ### SQS: adaptive polling via `SqsBackpressureController`
 
-`SqsBackpressureController` checks `consumer.lag.seconds` from `consumer_offsets` (updated by `ConsumerHealthTracker` after each successful handle). If the consumer hasn't processed an event in longer than `lag-pause-threshold-seconds`, polling is paused via a shared `AtomicBoolean`. The `SqsEventConsumer.poll()` checks this flag at the top of each iteration and skips the receive call when paused.
+`SqsBackpressureController` (`shared/shared-events`) reads `SqsConsumerLagMetrics.getMaxDepth()` — the source queue depth (visible + in-flight) polled from `SqsClient.getQueueAttributes()`. When depth exceeds `lag-pause-threshold`, it sets an internal `AtomicBoolean isPaused = true`. `SqsEventConsumer.poll()` checks `backpressureController.isPaused()` at the top of each scheduled invocation and returns early when paused — no `ReceiveMessage` call is made. Polling resumes automatically when depth drops below `lag-resume-threshold`.
 
-SQS queue depth can be monitored via the CloudWatch metric `ApproximateNumberOfMessagesVisible`. Add a CloudWatch alarm:
+Emits the same `consumer.backpressure.active` gauge as `KafkaBackpressureController` — the Prometheus `BackpressureActive` alert fires for both broker paths from a single rule.
 
+**CloudWatch alarm (secondary, fires even when service is down):**
 ```
-Metric:    SQS/ApproximateNumberOfMessagesVisible
-Namespace: AWS/SQS
+Metric:    AWS/SQS ApproximateNumberOfMessagesVisible
 QueueName: example-created
 Threshold: > 10000 for 5 consecutive minutes
-Action:    trigger SNS → PagerDuty / OpsGenie
+Action:    SNS → PagerDuty / OpsGenie
 ```
+
+### Non-retryable fast-path — SQS
+
+`SqsEventConsumer` classifies exceptions before deciding how to handle them:
+
+```
+Retryable   → extend visibility timeout (exponential backoff: 10s → 30s → 90s)
+              AWS Redrive Policy routes to DLQ after maxReceiveCount deliveries
+Non-retryable → write to DLQ immediately + delete from source queue
+              Skip all retry attempts (mirrors KafkaConsumerConfig.addNotRetryableExceptions())
+```
+
+Non-retryable exception types:
+```java
+IllegalArgumentException   // business validation failure — retrying will not fix it
+IllegalStateException      // state machine invariant violated
+JsonParseException         // malformed JSON payload — will never deserialise
+```
+
+`isNonRetryable()` walks the full cause chain, so non-retryable types wrapped in `RuntimeException` by handler code are also caught.
 
 ### Prometheus alert rules
 
-Alert rules are defined in `monitoring/prometheus-alerts.yml`. Key rules:
+Alert rules are defined in `docker/prometheus/alert_rules.yml` (loaded by `prometheus.yml` via `rule_files`). Rules apply to both Kafka and SNS/SQS paths unless noted:
 
-| Alert | Expression | Severity |
-|---|---|---|
-| `KafkaConsumerHighLag` | `kafka_consumer_lag > 10000` for 2 min | warning |
-| `KafkaConsumerCriticalLag` | `kafka_consumer_lag > 100000` for 5 min | critical |
-| `ConsumerStale` | `consumer_lag_seconds > 300` for 1 min | warning |
-| `BackpressureActive` | `consumer_backpressure_active == 1` for 5 min | warning |
-| `OutboxFailedRecords` | `outbox_records_failed > 0` for 0 s | critical |
+| Alert | Expression | Severity | Applies to |
+|---|---|---|---|
+| `KafkaConsumerHighLag` | `kafka_consumer_lag > 10000` for 2 min | warning | Kafka only |
+| `KafkaConsumerCriticalLag` | `kafka_consumer_lag > 100000` for 5 min | critical | Kafka only |
+| `ConsumerStale` | `consumer_lag_seconds > 300` for 1 min | warning | **Both** |
+| `BackpressureActive` | `consumer_backpressure_active == 1` for 5 min | warning | **Both** |
+| `OutboxFailedRecords` | `outbox_records_failed > 0` for 0 s | critical | **Both** |
+| `OutboxRelayNotPublishing` | `rate(outbox_relay_published_total[5m]) == 0 AND outbox_records_pending > 0` for 2 min | critical | **Both** |
+| `DlqMessagesAccumulating` | `rate(events_dlq_received_total[10m]) > 0.1` for 5 min | warning | **Both** |
+
+For SQS queue depth alerting beyond `consumer.backpressure.active`, add a CloudWatch alarm on `ApproximateNumberOfMessagesVisible` — it fires even when the consumer service is down.
 
 ---
 
@@ -2067,3 +2131,10 @@ Event replay re-publishes outbox records with their **original `schema_version`*
 | Two relay instances, zero duplicate deliveries | SKIP LOCKED claim ensures disjoint batches per pod |
 | Kill relay mid-poll, record still delivered | ReclaimTask reset expired IN_FLIGHT to PENDING on restart |
 | outbox.records.failed gauge > 0 | Record exhausted all attempts — alert fires, operator resets |
+| SNS FIFO publish with aggregateId → same MessageGroupId | Per-entity ordering via SnsEventPublisher.partitionKey() |
+| Publish same event_id twice to FIFO topic → only one delivery | MessageDeduplicationId dedup working at SNS broker |
+| sqs.consumer.lag{type=source} gauge > 0 | SqsConsumerLagMetrics.refreshDepth() polling SQS |
+| SQS queue depth > lagPauseThreshold → poll skipped | SqsBackpressureController paused, SqsEventConsumer returns early |
+| SQS poll resumes after depth < lagResumeThreshold | Backpressure auto-resume working |
+| IllegalArgumentException from handler → DLQ, no visibility extension | Non-retryable fast-path in SqsEventConsumer |
+| consumer.backpressure.active gauge == 1 during SQS pause | Same gauge works for both Kafka and SNS/SQS paths |
