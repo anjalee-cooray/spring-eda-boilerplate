@@ -64,6 +64,18 @@ public class EventUpcasterRegistry {
         return current;
     }
 
+    /**
+     * Returns all registered upcasters grouped by event type.
+     * Used by SchemaCompatibilityValidator to check chain contiguity on startup.
+     */
+    public Map<String, List<EventUpcaster>> getAllUpcasters() {
+        Map<String, List<EventUpcaster>> grouped = new HashMap<>();
+        for (EventUpcaster u : upcasters.values()) {
+            grouped.computeIfAbsent(u.eventType(), k -> new java.util.ArrayList<>()).add(u);
+        }
+        return grouped;
+    }
+
     private static String chainKey(String eventType, String version) {
         return eventType + "#" + version;
     }
