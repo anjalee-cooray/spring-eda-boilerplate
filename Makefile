@@ -1,4 +1,4 @@
-.PHONY: up down infra build migrate logs ps clean
+.PHONY: up down infra build migrate logs ps clean new-schema integration-test rebuild
 
 # Start the full local stack
 up:
@@ -74,3 +74,29 @@ sns-setup:
 	    --protocol sqs \
 	    --notification-endpoint arn:aws:sqs:us-east-1:000000000000:example-created
 	@echo "SNS/SQS setup complete. Queue URL: http://localhost:4566/000000000000/example-created"
+
+# ── Schema versioning ─────────────────────────────────────────────────────────
+# Scaffold a new event schema version JSON file and upcaster Java stub.
+# Usage: make new-schema EVENT_TYPE=example.created VERSION=2 SERVICE=example-consumer-service
+new-schema:
+	@if [ -z "$(EVENT_TYPE)" ] || [ -z "$(VERSION)" ] || [ -z "$(SERVICE)" ]; then \
+	  echo "Usage: make new-schema EVENT_TYPE=<type> VERSION=<N> SERVICE=<module>"; \
+	  echo "  Example: make new-schema EVENT_TYPE=example.created VERSION=2 SERVICE=example-consumer-service"; \
+	  exit 1; \
+	fi
+	./scripts/new-schema.sh --event-type $(EVENT_TYPE) --version $(VERSION) --service $(SERVICE)
+
+# ── Integration tests ─────────────────────────────────────────────────────────
+# Run all @Tag("integration") tests via Testcontainers.
+# Requires Docker running. First run pulls container images (~1-2 min).
+integration-test:
+	./gradlew integrationTest
+
+# ── Read model rebuild ────────────────────────────────────────────────────────
+# Trigger a read-model rebuild for a specific projection and tenant.
+# Usage: make rebuild PROJECTION=ExampleProjector VERSION=2 TENANT=tenant-1
+rebuild:
+	curl -s -X POST http://localhost:8082/projections/$(PROJECTION)/rebuild \
+	  -H "Content-Type: application/json" \
+	  -H "Authorization: Bearer $${JWT_TOKEN}" \
+	  -d '{"targetVersion":$(VERSION),"requestedBy":"make-target"}' | jq
