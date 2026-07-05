@@ -53,6 +53,9 @@ public class KafkaConsumerLagMetrics {
     @Value("${app.events.kafka.topics}")
     private String topics;
 
+    @Value("${app.consumer.backpressure.lag-warn-threshold:5000}")
+    private long lagWarnThreshold;
+
     public KafkaConsumerLagMetrics(AdminClient adminClient, MeterRegistry meterRegistry) {
         this.adminClient = adminClient;
         this.meterRegistry = meterRegistry;
@@ -112,13 +115,27 @@ public class KafkaConsumerLagMetrics {
                         .description("Kafka consumer group lag (messages behind latest)")
                         .register(meterRegistry);
 
-                log.debug("Kafka lag group={} topic={} partition={} lag={}",
-                        consumerGroupId, tp.topic(), tp.partition(), lag);
+                if (lag > lagWarnThreshold) {
+                    log.warn("Kafka consumer lag high group={} topic={} partition={} lag={} threshold={}",
+                            consumerGroupId, tp.topic(), tp.partition(), lag, lagWarnThreshold);
+                } else {
+                    log.debug("Kafka lag group={} topic={} partition={} lag={}",
+                            consumerGroupId, tp.topic(), tp.partition(), lag);
+                }
             }
 
         } catch (Exception ex) {
             log.warn("Failed to refresh Kafka consumer lag metrics", ex);
         }
+    }
+
+    /** Returns the maximum lag across all tracked partitions — 0 if no data yet. */
+    public long getMaxLag() {
+        return lagSnapshot.values().stream()
+                .flatMap(partitionMap -> partitionMap.values().stream())
+                .mapToLong(Long::longValue)
+                .max()
+                .orElse(0L);
     }
 
     private Set<TopicPartition> resolveTopicPartitions() {

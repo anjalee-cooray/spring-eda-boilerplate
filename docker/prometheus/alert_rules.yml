@@ -1,0 +1,111 @@
+groups:
+  # ── Consumer lag ─────────────────────────────────────────────────────────────
+  - name: consumer_lag
+    rules:
+      - alert: KafkaConsumerHighLag
+        expr: kafka_consumer_lag{group="example-consumer-service"} > 10000
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer lag is high"
+          description: >
+            Consumer group {{ $labels.group }} is {{ $value }} messages behind on
+            topic={{ $labels.topic }} partition={{ $labels.partition }}.
+            The consumer is processing slower than events are being published.
+            Check handler execution time and consider tuning max.poll.records.
+
+      - alert: KafkaConsumerCriticalLag
+        expr: kafka_consumer_lag{group="example-consumer-service"} > 100000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kafka consumer lag is critically high — data loss risk"
+          description: >
+            Consumer group {{ $labels.group }} is {{ $value }} messages behind on
+            topic={{ $labels.topic }} partition={{ $labels.partition }}.
+            At this lag level, events may reach broker retention expiry before being
+            consumed. Scale consumer replicas or reduce handler latency immediately.
+
+      - alert: ConsumerStale
+        # consumer_lag_seconds is the gauge registered by ConsumerHealthTracker.
+        # It measures seconds since the last successfully processed event per (consumer, event_type, tenant).
+        expr: consumer_lag_seconds > 300
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer has not processed an event in 5 minutes"
+          description: >
+            Consumer={{ $labels.consumer }} event_type={{ $labels.event_type }}
+            tenant={{ $labels.tenant_id }} has not processed an event for
+            {{ $value | humanizeDuration }}. The consumer may be stuck, crashed,
+            or the upstream publisher has stopped sending events.
+
+  # ── Backpressure ─────────────────────────────────────────────────────────────
+  - name: backpressure
+    rules:
+      - alert: BackpressureActive
+        # consumer_backpressure_active is set to 1 by KafkaBackpressureController
+        # when it pauses all KafkaListenerContainers due to high lag.
+        expr: consumer_backpressure_active == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer backpressure is active for > 5 minutes"
+          description: >
+            KafkaBackpressureController has paused all consumers because lag exceeded
+            the configured threshold. The consumer has been paused for > 5 minutes
+            without recovering. Investigate handler throughput or scale consumer replicas.
+
+  # ── Outbox relay health ───────────────────────────────────────────────────────
+  - name: outbox_relay
+    rules:
+      - alert: OutboxFailedRecords
+        # outbox_records_failed is the Gauge registered by OutboxRelayPoller.
+        # A value > 0 means records have exhausted all retry attempts and require operator action.
+        expr: outbox_records_failed > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox records are stuck in FAILED status"
+          description: >
+            {{ $value }} outbox record(s) are in FAILED status (exhausted all retry attempts).
+            Events in this state have NOT been published. Operator action required:
+            inspect last_error in outbox_records, fix the root cause, then reset
+            status to PENDING via the ops runbook.
+
+      - alert: OutboxRelayNotPublishing
+        # Fires when the relay has published 0 events in the last 5 minutes, despite
+        # PENDING records existing. Indicates the relay is stuck or crashed.
+        expr: rate(outbox_relay_published_total[5m]) == 0 AND outbox_records_pending > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox relay has stopped publishing events"
+          description: >
+            The outbox relay has published 0 events in the last 5 minutes while PENDING
+            records exist. The relay pod may be crashed, the broker may be unreachable,
+            or all workers may be stuck in IN_FLIGHT due to a clock skew preventing reclaim.
+
+  # ── DLQ depth ────────────────────────────────────────────────────────────────
+  - name: dlq
+    rules:
+      - alert: DlqMessagesAccumulating
+        # events_dlq_received_total is the counter registered by DlqConsumer.
+        # A sustained rate means messages are arriving on the DLQ faster than operators
+        # are resolving them.
+        expr: rate(events_dlq_received_total[10m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DLQ is accumulating messages faster than they are being resolved"
+          description: >
+            The DLQ is receiving > 0.1 messages/sec on average over the last 10 minutes.
+            Check DLQ consumer logs for repeated errors. If the same event_type is failing,
+            the handler may have a bug or the schema has changed.

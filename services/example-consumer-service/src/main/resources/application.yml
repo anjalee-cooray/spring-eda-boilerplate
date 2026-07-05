@@ -70,6 +70,19 @@ app:
     # Keep this > Prometheus scrape interval (default 15s) to avoid stale reads.
     lag-refresh-ms: ${KAFKA_LAG_REFRESH_MS:15000}
 
+  consumer:
+    backpressure:
+      # Pause all Kafka listeners when max partition lag exceeds this threshold.
+      # Consumers stop fetching from the broker until lag drops to lag-resume-threshold.
+      lag-pause-threshold: ${CONSUMER_LAG_PAUSE_THRESHOLD:10000}
+      # Resume fetching once max partition lag drops below this threshold.
+      # Must be < lag-pause-threshold to avoid oscillation.
+      lag-resume-threshold: ${CONSUMER_LAG_RESUME_THRESHOLD:1000}
+      # How often KafkaBackpressureController checks lag and adjusts containers.
+      check-interval-ms: ${CONSUMER_BACKPRESSURE_CHECK_MS:5000}
+      # Log a warning when any partition lag exceeds this value.
+      lag-warn-threshold: ${CONSUMER_LAG_WARN_THRESHOLD:5000}
+
 management:
   endpoints:
     web:
