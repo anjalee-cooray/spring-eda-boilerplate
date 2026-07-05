@@ -1752,6 +1752,35 @@ This prevents the datasource from being torn down while a listener is mid-saga-s
 
 ---
 
+## Test Coverage
+
+All tests use plain Mockito and AssertJ — no `@SpringBootTest`, no TestContainers required for unit tests. Tests run in milliseconds with no external dependencies.
+
+### Test inventory
+
+| Test class | Module | What it verifies |
+|---|---|---|
+| `OutboxWriterTest` | `shared-db` | Outbox record fields, event store mirror call, aggregateId passthrough |
+| `InboxDeduplicatorTest` | `shared-db` | Duplicate event_id rejected, first event accepted |
+| `EventEnvelopeTest` | `shared-events` | Builder defaults, correlation ID propagation |
+| `KafkaEventPublisherTest` | `shared-events` | Topic = eventType, partition key = tenantId:aggregateId |
+| `SqsEventConsumerNonRetryableTest` | `shared-events` | Non-retryable → DLQ write + source delete; retryable → visibility extend; success → source delete only |
+| `SqsBackpressureControllerTest` | `shared-events` | Pause on high depth, resume on low depth, stays paused between thresholds, gauge value |
+| `ExampleBookingSagaTest` | `example-consumer-service` | Start creates saga + inventory command; duplicate trigger ignored; inventory confirmed → payment step; payment confirmed → COMPLETED; payment failed → COMPENSATING + release command; inventory released → COMPENSATED |
+| `DlqConsumerTest` | `example-consumer-service` | Counter incremented per message, per-topic tagging, null headers safe |
+| `KafkaBackpressureControllerTest` | `example-consumer-service` | Pause on high lag, resume on low lag, no-op below threshold, gauge value |
+| `TenantContextHolderTest` | `shared-security` | ThreadLocal isolation, clear resets context |
+
+### Running tests
+
+```bash
+./gradlew test                     # all modules
+./gradlew :shared:shared-db:test   # single module
+./gradlew test --tests "*SagaTest" # single class
+```
+
+---
+
 ## Local verification guide
 
 ### Start the stack
