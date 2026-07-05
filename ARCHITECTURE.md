@@ -611,6 +611,86 @@ Alert to set: `resilience4j_circuitbreaker_state == 1` → P2 alert, circuit bre
 
 ---
 
+## Service discovery
+
+This boilerplate uses **platform DNS with environment variables** — no service registry (Eureka, Consul) is needed.
+
+### Why no Eureka or Consul
+
+The architecture deliberately avoids service-to-service HTTP calls. The gateway is the only component that calls downstream services, and services coordinate asynchronously through the broker. This means there are exactly **two downstream URLs** to manage across the entire system:
+
+```
+COMMAND_SERVICE_URL   — gateway → command-service
+QUERY_SERVICE_URL     — gateway → query-service
+```
+
+Eureka and Consul solve N×N discovery (every service finding every other service). This system has 2×1 — the problem doesn't exist here.
+
+### How resolution works per platform
+
+**Docker Compose (local dev)**
+
+Docker creates an internal network and assigns each service a DNS name matching its key in `docker-compose.yml`. No configuration needed.
+
+```
+COMMAND_SERVICE_URL=http://command-service:8081
+QUERY_SERVICE_URL=http://query-service:8082
+```
+
+The gateway resolves `command-service` via Docker's embedded DNS. Changing the number of replicas (`--scale command-service=3`) requires a load balancer in front — use Nginx or HAProxy, or switch to Kubernetes.
+
+**Kubernetes**
+
+Set these in the gateway `Deployment` env vars. kube-dns resolves the name to a ClusterIP, which load-balances across all healthy pods automatically.
+
+```
+COMMAND_SERVICE_URL=http://command-service.default.svc.cluster.local:8081
+QUERY_SERVICE_URL=http://query-service.default.svc.cluster.local:8082
+```
+
+Scaling command-service to 5 pods: the gateway URL stays the same — kube-dns + the `Service` resource handle it.
+
+```
+api-gateway pod
+    │
+    │  http://command-service.default.svc.cluster.local:8081
+    ▼
+K8s Service (ClusterIP)  ──► pod 1
+                          ──► pod 2
+                          ──► pod 3
+```
+
+**AWS ECS — internal ALB (recommended)**
+
+Each ECS service registers targets behind an internal Application Load Balancer. ECS handles health checks and drains unhealthy tasks automatically.
+
+```
+COMMAND_SERVICE_URL=http://internal-alb.your-vpc.amazonaws.com/command
+QUERY_SERVICE_URL=http://internal-alb.your-vpc.amazonaws.com/query
+```
+
+**AWS ECS — Cloud Map (lightweight alternative)**
+
+ECS registers each task in AWS Cloud Map. Cloud Map provides DNS that resolves to healthy task IPs — no ALB overhead for internal traffic.
+
+```
+COMMAND_SERVICE_URL=http://command-service.your-namespace.local:8081
+QUERY_SERVICE_URL=http://query-service.your-namespace.local:8082
+```
+
+### Summary
+
+| Platform | Mechanism | Config |
+|---|---|---|
+| Docker Compose | Docker embedded DNS | Service name = key in `docker-compose.yml` |
+| Kubernetes | kube-dns + ClusterIP Service | `service.namespace.svc.cluster.local` |
+| ECS + ALB | Internal ALB target groups | ALB DNS name |
+| ECS + Cloud Map | AWS Cloud Map DNS | Cloud Map namespace DNS |
+
+In every case: only `COMMAND_SERVICE_URL` and `QUERY_SERVICE_URL` need to change. No code changes, no service registry to operate.
+
+---
+
 ## Shared library responsibilities
 
 Each shared library is a Spring Boot auto-configuration module — services include it as a dependency and it wires itself automatically via `AutoConfiguration.imports`.

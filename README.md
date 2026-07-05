@@ -259,6 +259,26 @@ app.events.broker: kafka
 app.events.broker: sns
 ```
 
+### Service discovery
+
+No service registry needed. Set two env vars and the platform's DNS handles the rest:
+
+```bash
+# Docker Compose — service name resolves via Docker DNS
+COMMAND_SERVICE_URL=http://command-service:8081
+QUERY_SERVICE_URL=http://query-service:8082
+
+# Kubernetes — kube-dns resolves to a ClusterIP load-balancing across all pods
+COMMAND_SERVICE_URL=http://command-service.default.svc.cluster.local:8081
+QUERY_SERVICE_URL=http://query-service.default.svc.cluster.local:8082
+
+# AWS ECS — point to an internal ALB or Cloud Map DNS name
+COMMAND_SERVICE_URL=http://internal-alb.your-vpc.amazonaws.com/command
+QUERY_SERVICE_URL=http://internal-alb.your-vpc.amazonaws.com/query
+```
+
+The gateway is the only component that makes HTTP calls to downstream services. Services never call each other directly — all async coordination goes through the broker. This means there are only two URLs to manage across the entire system. See [`ARCHITECTURE.md`](ARCHITECTURE.md#service-discovery) for the full decision rationale.
+
 ### Payment provider
 
 ```yaml
