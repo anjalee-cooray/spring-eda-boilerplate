@@ -328,6 +328,144 @@ resource "aws_cloudwatch_metric_alarm" "dlq_depth" {
 
 ---
 
+### Event Replay
+
+Event replay re-publishes already-processed events from `outbox_records` back to the broker. It is the primary tool for three operational scenarios:
+
+| Scenario | What happened | Replay scope |
+|---|---|---|
+| Handler bug fixed | Consumer processed events incorrectly; fix deployed | Event type + date range |
+| New consumer added | Service needs to bootstrap from historical events | Full tenant or event type |
+| Read model corrupted | DB wiped or projection logic changed | Full tenant |
+| Outage recovery | Events missed during a broker/consumer outage | Date range |
+
+#### Why replay is safe
+
+Events are re-published with their **original `event_id`**. Each consumer's `inbox_records` table deduplicates by `event_id`:
+- Consumers that already processed the event → skip it silently (idempotent)
+- New or reset consumers → process it normally
+
+No special replay-awareness is needed in consumer code. The idempotent consumer pattern makes replay safe by design.
+
+#### Replay is broker-agnostic
+
+Replay publishes via `EventPublisher`. The same replay job works for both Kafka and SNS/SQS — switch `EVENTS_BROKER` in config and replay behaviour is unchanged.
+
+#### API
+
+Replay is triggered via the `outbox-relay` service's operator API (not exposed through the public gateway):
+
+```
+POST /replay/jobs         — trigger a replay job (returns 202 + job ID)
+GET  /replay/jobs/{id}    — poll progress
+GET  /replay/jobs         — list all jobs (filter by ?tenantId=...)
+```
+
+The HTTP response returns immediately with a job ID. Replay runs asynchronously in a dedicated thread pool (`replay-*` threads) so the outbox poller continues uninterrupted.
+
+#### Replay scopes
+
+All parameters except `tenantId` and `requestedBy` are optional. Filters combine with AND:
+
+```json
+// Full tenant replay — rebuild all read models from scratch
+{ "tenantId": "tenant-1", "requestedBy": "ops" }
+
+// Specific event type — after fixing a handler bug
+{ "tenantId": "tenant-1", "eventType": "example.created", "requestedBy": "ops" }
+
+// Date range — recover events from an outage window
+{ "tenantId": "tenant-1",
+  "fromTimestamp": "2025-01-01T00:00:00Z",
+  "toTimestamp":   "2025-01-02T00:00:00Z",
+  "requestedBy":   "ops" }
+
+// Specific outbox record IDs — targeted fix
+{ "tenantId": "tenant-1",
+  "specificIds": ["uuid1", "uuid2"],
+  "requestedBy": "ops" }
+```
+
+#### Job lifecycle
+
+```
+POST /replay/jobs
+  → status: PENDING  (job created, returned in response)
+  → status: RUNNING  (async execution starts, totalEvents populated)
+  → status: COMPLETED  (all events re-published)
+     or
+  → status: FAILED  (error mid-replay, replayedCount shows progress before failure)
+```
+
+`replay_jobs` table stores every job permanently — full audit trail of who triggered what, when, and the outcome.
+
+#### Progress monitoring
+
+```bash
+# Trigger full tenant replay
+make replay TENANT=tenant-1
+
+# Poll progress
+make replay-status JOB=<uuid>
+
+# or raw curl:
+curl http://localhost:8084/replay/jobs/<uuid> | jq
+# {
+#   "id": "...",
+#   "status": "RUNNING",
+#   "totalEvents": 1500,
+#   "replayedCount": 300,
+#   ...
+# }
+```
+
+Prometheus metric: `replay.events.published` (counter) — tracks total events re-published across all jobs.
+
+#### Replay flow
+
+```
+Operator → POST /replay/jobs
+               │
+               ▼
+         ReplayJob created (PENDING)
+         202 Accepted returned immediately
+               │
+               ▼ (async, replay-* thread)
+         ReplayJobService.execute()
+               │
+               ├─ specificIds set? → outboxRepository.findAllByIdIn(ids)
+               └─ query-based?     → outboxRepository.findPublishedForReplay(
+                                       tenantId, eventType, from, to)
+               │
+               ▼
+         For each OutboxRecord (ordered by createdAt ASC):
+           Build EventEnvelope with original event_id
+           eventPublisher.publish(envelope)   ← Kafka or SNS, same code
+           job.replayedCount++
+           persist every 100 events
+               │
+               ▼
+         Consumers receive events
+           inbox_records.isDuplicate(event_id)?
+             YES → skip (already processed)
+             NO  → process + markProcessed(event_id)
+               │
+               ▼
+         job.status = COMPLETED
+```
+
+#### Replay vs DLQ redrive
+
+| | Event Replay | DLQ Redrive |
+|---|---|---|
+| Source | `outbox_records` (permanent) | DLQ topic / DLQ queue (retention-limited) |
+| Scope | Any scope — tenant, type, date, IDs | All messages currently in DLQ |
+| Trigger | `POST /replay/jobs` | Kafka: `--reset-offsets`; SQS: AWS Console "Start DLQ redrive" |
+| When to use | Bug fix, new consumer, model rebuild | Transient failures after recovery |
+| Deduplication | Inbox dedup (original event_id) | Inbox dedup (original event_id) |
+
+---
+
 ### Event Choreography
 
 Choreography is how services react to each other without a central coordinator. Each service listens for events it cares about and publishes new events as a result.

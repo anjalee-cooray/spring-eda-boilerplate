@@ -33,6 +33,23 @@ down:
 clean:
 	docker compose down -v
 
+# Trigger a full tenant replay (rebuilds all read models from outbox history)
+# Usage: make replay TENANT=tenant-1
+replay:
+	curl -s -X POST http://localhost:8084/replay/jobs \
+	  -H "Content-Type: application/json" \
+	  -d '{"tenantId":"$(TENANT)","requestedBy":"make-target"}' | jq
+
+# Poll replay job status
+# Usage: make replay-status JOB=<uuid>
+replay-status:
+	curl -s http://localhost:8084/replay/jobs/$(JOB) | jq
+
+# List all replay jobs for a tenant
+# Usage: make replay-list TENANT=tenant-1
+replay-list:
+	curl -s "http://localhost:8084/replay/jobs?tenantId=$(TENANT)" | jq
+
 # Start LocalStack for SNS/SQS local development
 infra-sns:
 	docker compose --profile sns up localstack -d
