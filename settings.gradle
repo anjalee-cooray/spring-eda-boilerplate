@@ -8,6 +8,7 @@ include ':shared:shared-db'
 include ':shared:shared-events'
 include ':shared:shared-payments'
 include ':shared:shared-resilience'
+include ':shared:shared-secrets'
 
 // Services
 include ':services:db-migrations'
@@ -16,3 +17,4 @@ include ':services:example-command-service'
 include ':services:example-query-service'
 include ':services:example-consumer-service'
 include ':services:outbox-relay'
+include ':services:config-service'
