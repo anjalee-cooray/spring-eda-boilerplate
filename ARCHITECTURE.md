@@ -1658,6 +1658,48 @@ For SQS queue depth alerting beyond `consumer.backpressure.active`, add a CloudW
 
 ---
 
+## Role-Based Access Control (RBAC)
+
+Every HTTP endpoint is protected by `@PreAuthorize` method-level security. `@EnableMethodSecurity` in `SecurityAutoConfiguration` activates Spring Security's AOP interceptors. Authorization is evaluated **after** authentication — a valid JWT is always required, then the role check runs.
+
+### JWT roles claim → Spring Security authorities
+
+The default `JwtAuthenticationConverter` only reads the `scope` / `scp` claim. Without explicit configuration, `hasRole('TENANT_ADMIN')` always returns false even when the JWT contains the right role. `SecurityAutoConfiguration` registers a custom converter:
+
+```java
+JwtGrantedAuthoritiesConverter rolesConverter = new JwtGrantedAuthoritiesConverter();
+rolesConverter.setAuthoritiesClaimName("roles");   // reads the "roles" array from the JWT
+rolesConverter.setAuthorityPrefix("ROLE_");        // maps "TENANT_ADMIN" → GrantedAuthority("ROLE_TENANT_ADMIN")
+```
+
+The `@PreAuthorize("hasRole('TENANT_ADMIN')")` SpEL expression then matches `ROLE_TENANT_ADMIN` in the authority set.
+
+### Roles
+
+| Role | JWT claim value | Services | Granted access |
+|---|---|---|---|
+| `TENANT_ADMIN` | `"TENANT_ADMIN"` | command-service, query-service | All tenant endpoints |
+| `TENANT_MEMBER` | `"TENANT_MEMBER"` | command-service, query-service | All tenant endpoints |
+| `PLATFORM_OPERATOR` | `"PLATFORM_OPERATOR"` | outbox-relay | Replay job management |
+
+### Endpoint authorization matrix
+
+| Endpoint | Service | Required role |
+|---|---|---|
+| `POST /commands/examples` | example-command-service | `TENANT_ADMIN` or `TENANT_MEMBER` |
+| `GET /queries/examples` | example-query-service | `TENANT_ADMIN` or `TENANT_MEMBER` |
+| `GET /queries/examples/{id}` | example-query-service | `TENANT_ADMIN` or `TENANT_MEMBER` |
+| `POST /replay/jobs` | outbox-relay | `PLATFORM_OPERATOR` |
+| `GET /replay/jobs/{id}` | outbox-relay | `PLATFORM_OPERATOR` |
+| `GET /replay/jobs` | outbox-relay | `PLATFORM_OPERATOR` |
+| `/actuator/health`, `/actuator/info`, `/actuator/prometheus` | all | public (no token) |
+
+### Replay endpoint security
+
+The replay API was previously annotated as "internal — restrict via VPC or mTLS." This is now enforced via JWT: requests to `/replay/jobs/**` require a token with `roles: ["PLATFORM_OPERATOR"]`. The OIDC issuer URI is configured via `OAUTH2_ISSUER_URI` in `outbox-relay`'s `application.yml`. VPC-level restriction remains a defence-in-depth layer on top.
+
+---
+
 ## Local verification guide
 
 ### Start the stack

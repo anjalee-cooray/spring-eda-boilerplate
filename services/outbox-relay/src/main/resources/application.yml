@@ -61,6 +61,15 @@ app:
     # Keep this > lock-timeout-seconds to avoid reclaiming records still being processed.
     reclaim-interval-ms: ${RELAY_RECLAIM_INTERVAL_MS:60000}
 
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Operator tokens must be issued by the same IdP as tenant tokens.
+          # The PLATFORM_OPERATOR role in the JWT roles claim grants access to replay endpoints.
+          issuer-uri: ${OAUTH2_ISSUER_URI:http://localhost:8080/realms/eda}
+
 server:
   port: ${PORT:8084}
 
