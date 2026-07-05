@@ -22,6 +22,13 @@ spring:
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
       acks: all
       retries: 3
+      properties:
+        # Idempotent producer: broker deduplicates retried ProduceRequests by
+        # (producerId, partition, sequenceNumber). Prevents double-publish when
+        # the relay retries after a network timeout between Phase 2 and Phase 3.
+        # Requires acks=all. max.in.flight.requests.per.connection <= 5.
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
 
 app:
   events:
