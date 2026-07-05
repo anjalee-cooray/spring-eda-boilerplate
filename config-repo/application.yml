@@ -1,0 +1,36 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared defaults — applied to ALL services.
+# Service-specific files (e.g. example-command-service.yml) override these.
+# ─────────────────────────────────────────────────────────────────────────────
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,refresh,busrefresh,env
+  endpoint:
+    health:
+      show-details: always
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  loki:
+    url: ${LOGGING_LOKI_URL:http://localhost:3100}
+
+# ── Secrets Manager (disabled locally, enable in production) ─────────────────
+app:
+  secrets:
+    enabled: ${SECRETS_ENABLED:false}
+    region: ${AWS_REGION:us-east-1}
+    endpoint-override: ${SECRETS_ENDPOINT_OVERRIDE:}
+    cache-ttl-seconds: 300
+
+# ── Graceful shutdown ─────────────────────────────────────────────────────────
+server:
+  shutdown: graceful
+
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}

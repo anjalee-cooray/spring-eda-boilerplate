@@ -1,0 +1,13 @@
+# ── example-query-service runtime config ──────────────────────────────────────
+
+app:
+  secrets:
+    secret-names: ${QUERY_SERVICE_SECRET_NAMES:}
+
+  # ── Pagination limits (read by @RefreshScope DynamicServiceConfig) ──────────
+  query:
+    max-page-size: ${QUERY_MAX_PAGE_SIZE:100}
+    default-page-size: ${QUERY_DEFAULT_PAGE_SIZE:20}
+
+  features:
+    example-query-enabled: ${EXAMPLE_QUERY_ENABLED:true}

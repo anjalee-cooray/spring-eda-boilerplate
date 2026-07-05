@@ -1,0 +1,15 @@
+# ── outbox-relay runtime config ───────────────────────────────────────────────
+
+app:
+  secrets:
+    secret-names: ${RELAY_SECRET_NAMES:}
+
+  relay:
+    poll-interval-ms: ${RELAY_POLL_INTERVAL_MS:1000}
+    batch-size: ${RELAY_BATCH_SIZE:50}
+    lock-timeout-seconds: ${RELAY_LOCK_TIMEOUT_SECONDS:30}
+    max-attempts: ${RELAY_MAX_ATTEMPTS:5}
+    reclaim-interval-ms: ${RELAY_RECLAIM_INTERVAL_MS:60000}
+
+  features:
+    replay-enabled: ${REPLAY_ENABLED:true}

@@ -1,0 +1,61 @@
+spring:
+  application:
+    name: config-service
+
+  cloud:
+    config:
+      server:
+        # ── Git backend (production) ────────────────────────────────────────
+        # Set CONFIG_REPO_URI to your private Git repo URL in production.
+        # SSH key auth: set GIT_PRIVATE_KEY as a multi-line env var.
+        # HTTP auth: set CONFIG_REPO_USERNAME + CONFIG_REPO_PASSWORD.
+        #
+        # git:
+        #   uri: ${CONFIG_REPO_URI}
+        #   default-label: ${CONFIG_REPO_BRANCH:main}
+        #   username: ${CONFIG_REPO_USERNAME:}
+        #   password: ${CONFIG_REPO_PASSWORD:}
+        #   search-paths: '{application}'    # one subdirectory per service if preferred
+        #   clone-on-start: true             # fail fast if repo unreachable at startup
+
+        # ── Native filesystem backend (local dev default) ───────────────────
+        # Reads from config-repo/ at the project root — no Git credentials needed.
+        # Switch to git backend in production by activating the 'git' profile:
+        #   SPRING_PROFILES_ACTIVE=git
+        native:
+          search-locations: ${CONFIG_REPO_PATH:file:./config-repo}
+
+    bus:
+      enabled: true
+      # POST /actuator/busrefresh on any service to push config changes to all instances.
+      # Requires spring-cloud-starter-bus-kafka on each client service.
+      destination: spring-cloud-bus
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:native}
+
+server:
+  port: ${PORT:8888}
+  shutdown: graceful
+
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,busrefresh,refresh,env
+  endpoint:
+    health:
+      show-details: always
+    busrefresh:
+      enabled: true
+
+logging:
+  loki:
+    url: ${LOGGING_LOKI_URL:http://localhost:3100}

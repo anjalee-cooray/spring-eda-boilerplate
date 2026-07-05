@@ -1,0 +1,21 @@
+# ── example-command-service runtime config ────────────────────────────────────
+# Changes here take effect after POST /actuator/busrefresh (no restart needed).
+# @RefreshScope beans in this service re-read these values on the next invocation.
+
+app:
+  secrets:
+    # Secret names loaded from AWS Secrets Manager at startup.
+    # Format: ARN or name, comma-separated.
+    # Example: arn:aws:secretsmanager:us-east-1:123456789012:secret:/eda/prod/command-db
+    secret-names: ${COMMAND_SERVICE_SECRET_NAMES:}
+
+  # ── Rate limiting (read by @RefreshScope DynamicServiceConfig) ───────────
+  rate-limit:
+    # Maximum commands a single tenant may submit per second.
+    # Raise this for enterprise tenants; lower it for free-tier tenants.
+    commands-per-second: ${COMMAND_RATE_LIMIT:100}
+
+  # ── Feature flags ──────────────────────────────────────────────────────────
+  features:
+    # Set to false to disable new command types without a redeployment.
+    example-command-enabled: ${EXAMPLE_COMMAND_ENABLED:true}

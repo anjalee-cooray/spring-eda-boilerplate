@@ -1,0 +1,21 @@
+# ── example-consumer-service runtime config ───────────────────────────────────
+# Backpressure thresholds are read here at runtime.
+# Note: @Scheduled beans read @Value fields once at construction. To make
+# thresholds truly dynamic, inject Environment directly in checkAndAdjust()
+# or restart the service after a threshold change. A future enhancement can
+# wrap these in a @RefreshScope @ConfigurationProperties bean.
+
+app:
+  secrets:
+    secret-names: ${CONSUMER_SERVICE_SECRET_NAMES:}
+
+  consumer:
+    backpressure:
+      lag-pause-threshold: ${CONSUMER_LAG_PAUSE_THRESHOLD:10000}
+      lag-resume-threshold: ${CONSUMER_LAG_RESUME_THRESHOLD:1000}
+      check-interval-ms: ${CONSUMER_BACKPRESSURE_CHECK_MS:5000}
+      lag-warn-threshold: ${CONSUMER_LAG_WARN_THRESHOLD:5000}
+
+  features:
+    saga-enabled: ${SAGA_ENABLED:true}
+    dlq-consumer-enabled: ${DLQ_CONSUMER_ENABLED:true}

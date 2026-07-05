@@ -1,0 +1,11 @@
+plugins {
+    id 'spring-conventions'
+}
+
+dependencies {
+    implementation project(':shared:shared-logging')
+    implementation project(':shared:shared-telemetry')
+    implementation 'org.springframework.cloud:spring-cloud-config-server'
+    // Spring Cloud Bus: broadcasts /actuator/busrefresh to all client instances via Kafka
+    implementation 'org.springframework.cloud:spring-cloud-starter-bus-kafka'
+}

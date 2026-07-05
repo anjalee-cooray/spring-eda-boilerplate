@@ -1,0 +1,30 @@
+# ── api-gateway runtime config ────────────────────────────────────────────────
+# Rate limits and circuit breaker thresholds update on busrefresh — no restart.
+
+app:
+  secrets:
+    secret-names: ${GATEWAY_SECRET_NAMES:}
+
+# ── Rate limiting (token bucket per tenant, backed by Redis) ─────────────────
+# replenishRate: sustained requests/second added to the token bucket
+# burstCapacity:  maximum tokens in the bucket (handles burst above sustained rate)
+# Raise burstCapacity for enterprise tenants using a custom RateLimiter bean.
+app:
+  rate-limit:
+    replenish-rate: ${RATE_LIMIT_REPLENISH_RATE:20}
+    burst-capacity: ${RATE_LIMIT_BURST_CAPACITY:40}
+
+# ── Circuit breaker thresholds ────────────────────────────────────────────────
+resilience4j:
+  circuitbreaker:
+    instances:
+      command-service:
+        sliding-window-size: ${CB_WINDOW_SIZE:20}
+        failure-rate-threshold: ${CB_FAILURE_RATE:60}
+        wait-duration-in-open-state: ${CB_WAIT_DURATION:10s}
+        permitted-calls-in-half-open-state: ${CB_HALF_OPEN_CALLS:5}
+      query-service:
+        sliding-window-size: ${CB_WINDOW_SIZE:20}
+        failure-rate-threshold: ${CB_FAILURE_RATE:60}
+        wait-duration-in-open-state: ${CB_WAIT_DURATION:10s}
+        permitted-calls-in-half-open-state: ${CB_HALF_OPEN_CALLS:5}
