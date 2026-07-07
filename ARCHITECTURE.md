@@ -2404,12 +2404,162 @@ The `EventSchemaRegistry` parses the filename to extract the event type and vers
 | `EventVersion` | `shared-events` | Maps event type → current version number |
 | `EventUpcaster` | `shared-events` | Interface for a single version migration |
 | `EventUpcasterRegistry` | `shared-events` | Chains upcasters; called before handler dispatch |
+| `SchemaCompatibilityValidator` | `shared-events` | Validates upcaster chain continuity at startup |
 | `SchemaValidationException` | `shared-events` | Thrown when payload fails schema validation |
 | `ExampleCreatedV1ToV2Upcaster` | `example-consumer-service` | Template upcaster (commented out) |
+
+#### Schema compatibility validation at startup
+
+`SchemaCompatibilityValidator` runs on `ApplicationReadyEvent` and walks every upcaster chain registered in `EventUpcasterRegistry`. It sorts upcasters by `fromVersion()` and verifies each adjacent pair satisfies `current.toVersion().equals(next.fromVersion())`. If any gap is found the application fails to start:
+
+```
+IllegalStateException: Upcaster chain gaps detected for event type 'example.created':
+  gap between v1→v2 and v3→v4 (missing v2→v3)
+```
+
+This catches chain breaks at deploy time rather than at consumer dispatch time — a broken chain that only fires on rarely-seen old events would otherwise go unnoticed until production.
+
+#### Blue/green schema migration
+
+See [`SCHEMA_MIGRATION_RUNBOOK.md`](SCHEMA_MIGRATION_RUNBOOK.md) for the full 3-phase procedure:
+
+1. **Deploy upcaster first** (consumers can now handle both v1 and v2)
+2. **Update producer** to emit v2 (blue/green cutover — old pods emit v1, new pods emit v2)
+3. **Retire v1** after all old pods are replaced
+
+The `make new-schema` Makefile target scaffolds the schema JSON file and upcaster stub in one command:
+
+```bash
+make new-schema EVENT_TYPE=example.created VERSION=2 SERVICE=example-consumer-service
+```
 
 #### Replay and schema versions
 
 Event replay re-publishes outbox records with their **original `schema_version`**. This means consumers always receive events at the version they were originally published with, regardless of the current schema version. The upcaster chain then normalises them before handler dispatch — making replay safe even across schema migrations.
+
+---
+
+## Observability add-ons
+
+### Optional Sentry error tracking
+
+`SentryAutoConfiguration` in `shared-telemetry` provides opt-in Sentry integration. It activates only when both conditions are met:
+
+1. `io.sentry.Sentry` is on the classpath (the service added `implementation 'io.sentry:sentry-spring-boot-starter-jakarta:7.14.0'` to its own `build.gradle`)
+2. `app.sentry.dsn` property is set
+
+`shared-telemetry` itself declares the dependency as `compileOnly` — it compiles against the API but does not force it onto dependent services. This means the boilerplate ships with Sentry support but services that do not configure it pay zero dependency cost.
+
+Configuration applied automatically:
+- `sendDefaultPii = false`
+- Service name, environment, and release tags populated from Spring properties
+- Graceful flush on shutdown via `AutoCloseable`
+
+---
+
+## Security add-ons
+
+### Secret rotation without pod restart
+
+`SecretsRefreshScheduler` in `shared-security` polls for secret changes on a configurable interval and triggers a `ContextRefresher.refresh()` call, which re-binds all `@RefreshScope` beans in place.
+
+Activation requires two conditions:
+```yaml
+app.secrets.refresh.enabled: true
+app.secrets.refresh.interval-ms: 300000  # default: 5 minutes
+```
+
+The scheduler redacts sensitive keys from its structured log output (any key containing: `password`, `secret`, `key`, `token`, `dsn`, `credentials`, `cert`, `private`).
+
+**Known limitation:** Kafka and SQS clients hold long-lived connections and do not honour `@RefreshScope`. For broker credential rotation, use IAM roles (AWS) or mTLS certificate rotation rather than property-based secrets.
+
+### Config change audit trail
+
+`ConfigChangeAuditListener` in `shared-security` listens for Spring Cloud's `EnvironmentChangeEvent` and emits a structured log line on every change:
+
+```
+event=config_changed changedKeyCount=2 changedKeys=[database.url, cache.ttl] occurredAt=2026-07-07T10:00:00Z
+```
+
+The same redaction list as `SecretsRefreshScheduler` applies — secret keys are replaced with `[REDACTED]` in the log output.
+
+---
+
+## Test infrastructure
+
+### Property-based tests — UpcasterChainPropertyTest
+
+`UpcasterChainPropertyTest` (`shared-events`) defines 10 invariants (P1–P10) that any correct `EventUpcasterRegistry` + `SchemaCompatibilityValidator` pair must satisfy:
+
+| Invariant | What it asserts |
+|---|---|
+| P1 | Registry accepts a single upcaster without error |
+| P2 | Two upcasters for different event types are independent |
+| P3 | Registration order does not affect dispatch order (sorted by fromVersion) |
+| P4 | `upcastToLatest` applies the full chain in order |
+| P5 | An envelope already at the latest version passes through unchanged |
+| P6 | `upcastToLatest` on an unknown event type returns the envelope unchanged |
+| P7 | Multiple event types coexist in the same registry without cross-contamination |
+| P8 | A v1→v2→v3 chain reaches v3 from v1 in two hops |
+| P9 | `SchemaCompatibilityValidator` throws `IllegalStateException` when a gap exists |
+| P10 | A single upcaster (no adjacent pair to check) is trivially valid |
+
+### Transactional idempotency — DlqRecoveryIdempotencyTest
+
+`DlqRecoveryIdempotencyTest` (`shared-db`) verifies that re-queuing an already-processed event from a DLQ is safe. The key challenge is transaction isolation: `isDuplicate()` uses `REQUIRES_NEW`, which can only see committed data. Tests annotate methods with `@Transactional(NOT_SUPPORTED)` and explicitly commit `markProcessed()` calls via `TransactionTemplate`:
+
+```java
+private void commitMarkProcessed(UUID eventId) {
+    new TransactionTemplate(txManager).executeWithoutResult(status ->
+            inboxDeduplicator.markProcessed(eventId, "example.created", "tenant-dlq"));
+}
+```
+
+This matches the production propagation contract exactly.
+
+### Load test — OutboxWriterLoadTest
+
+`OutboxWriterLoadTest` (`shared-db`) runs 10 threads each writing 50 events (500 total) to a real PostgreSQL container. Each thread sets its own `TenantContextHolder` and commits via `TransactionTemplate`. Assertions:
+
+- All 500 writes succeed with no duplicate `event_id` constraint violations
+- Sequential throughput floor: > 50 events/second over 100 writes (baseline sanity check)
+
+### Kafka consumer lag — KafkaConsumerLagIntegrationTest
+
+`KafkaConsumerLagIntegrationTest` (`example-consumer-service`) uses a real `KafkaContainer` (`confluentinc/cp-kafka:7.4.0`) and `AdminClient.alterConsumerGroupOffsets()` to set committed offsets without running a live consumer. This makes lag values deterministic. The test verifies:
+
+- Lag above `lagWarnThreshold` triggers a `pause()` call on the container
+- Lag below the threshold leaves the container running
+
+### Network chaos — OutboxNetworkChaosTest
+
+`OutboxNetworkChaosTest` (`shared-db`) uses Toxiproxy to inject network faults between the test process and PostgreSQL:
+
+```
+Test process → Toxiproxy:port → PostgreSQL:5432
+```
+
+Three scenarios:
+1. **Latency (500ms)** — writes succeed but are slow; verifies the dual-write is not time-sensitive
+2. **Latency removal** — after removing the toxin, write speed returns to baseline
+3. **Zero-bandwidth (TCP stall)** — writes fail; after removing the toxin, a new connection is acquired and writes succeed with no partial records from the failed attempt
+
+The `bandwidth` toxin with `rate=0` is used (not a hard TCP RST) because it simulates the realistic cloud failure mode — a network partition where existing connections stall rather than break with an RST.
+
+### JMH micro-benchmarks — EventEnvelopeSerializationBenchmark
+
+`EventEnvelopeSerializationBenchmark` (`shared-db`) measures ObjectMapper throughput and latency on the `EventEnvelope` serialization path — the hot path in the outbox relay's publish loop.
+
+| Benchmark | Measures |
+|---|---|
+| `serializeSmallPayload` | Throughput for a ~100-byte payload |
+| `serializeLargePayload` | Throughput for a ~1 KB payload (scaling with payload size) |
+| `serializeMinimalEnvelope` | Fixed overhead of Jackson + record component access |
+| `roundTripSmallPayload` | Full encode + decode cost per broker message |
+
+Run: `./gradlew :shared:shared-db:jmh`
+
+A healthy envelope serialization should take < 10 µs for a typical payload. If throughput drops below 50,000 ops/sec, investigate ObjectMapper singleton reuse, payload types requiring expensive reflection, or GC pressure from object allocation.
 
 ---
 
@@ -2451,3 +2601,15 @@ Event replay re-publishes outbox records with their **original `schema_version`*
 | SQS poll resumes after depth < lagResumeThreshold | Backpressure auto-resume working |
 | IllegalArgumentException from handler → DLQ, no visibility extension | Non-retryable fast-path in SqsEventConsumer |
 | consumer.backpressure.active gauge == 1 during SQS pause | Same gauge works for both Kafka and SNS/SQS paths |
+| UpcasterChainPropertyTest P9 throws IllegalStateException | SchemaCompatibilityValidator detects upcaster chain gaps at startup |
+| UpcasterChainPropertyTest P3 passes regardless of registration order | EventUpcasterRegistry sorts by fromVersion before dispatch |
+| DlqRecoveryIdempotencyTest — re-queued event skipped | isDuplicate() sees committed markProcessed() across REQUIRES_NEW boundary |
+| OutboxWriterLoadTest — 500 writes, no duplicates | RLS + unique constraint on event_id holds under concurrent load |
+| KafkaConsumerLagIntegrationTest — lag > threshold → container paused | KafkaBackpressureController pause path working end-to-end with real broker |
+| OutboxNetworkChaosTest — TCP stall → write fails, no partial record | Atomic dual-write (outbox + event_store) rolls back cleanly under network fault |
+| OutboxNetworkChaosTest — toxin removed → write succeeds | Connection pool acquires new connection after partition resolves |
+| SchemaCompatibilityValidator passes on startup with gap-free chain | ValidSchemas registered → application starts without error |
+| app.sentry.dsn set + io.sentry.Sentry on classpath → Sentry active | SentryAutoConfiguration dual-conditional activation working |
+| app.secrets.refresh.enabled=true → refresh() called every interval | SecretsRefreshScheduler @Scheduled wiring working |
+| EnvironmentChangeEvent → structured log with redacted keys | ConfigChangeAuditListener redaction and structured output working |
+| jmh benchmark serializeSmallPayload > 50k ops/sec | ObjectMapper reuse and Jackson record serialization within overhead budget |

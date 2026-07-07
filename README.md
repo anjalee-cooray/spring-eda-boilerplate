@@ -22,8 +22,12 @@ See [`next-eda-boilerplate`](https://github.com/anjalee-cooray/next-eda-boilerpl
 | **Auth** | OIDC JWT — Okta by default, any OIDC-compliant provider via one env var |
 | **Payments** | `PaymentGateway` interface, Stripe implementation with idempotency keys |
 | **Observability** | OTel traces → Tempo, structured logs → Loki, metrics → Prometheus, Grafana dashboards |
+| **Schema evolution** | `EventUpcaster` chain with `SchemaCompatibilityValidator` (startup gap detection); blue/green migration runbook (`SCHEMA_MIGRATION_RUNBOOK.md`) |
+| **Error tracking** | Optional Sentry integration via `SentryAutoConfiguration` (`compileOnly` — opt-in per service) |
+| **Secret rotation** | `SecretsRefreshScheduler` — polls Spring Cloud Config every 5 min, rotates `@RefreshScope` beans without pod restart |
+| **Config audit** | `ConfigChangeAuditListener` — structured log on every `EnvironmentChangeEvent`; redacts passwords/tokens/keys |
 | **CI/CD** | GitHub Actions: Checkstyle, unit tests, integration tests (Testcontainers), GHCR image build, rolling deploy with smoke tests and rollback |
-| **Build** | Gradle multi-module monorepo, `buildSrc` conventions |
+| **Build** | Gradle multi-module monorepo, `buildSrc` conventions; `jmh-conventions` plugin for JMH micro-benchmarks |
 
 ---
 
@@ -216,6 +220,8 @@ Add GET endpoints directly to the command controller to read data. No query serv
 | Target | What it does |
 |---|---|
 | `make infra` | Start infrastructure services only (Postgres, Redis, Kafka, observability, OIDC) |
+| `make infra-sns` | Start LocalStack for SNS/SQS local development |
+| `make sns-setup` | Create SNS topics, SQS queues, and DLQs in LocalStack (run once after `infra-sns`) |
 | `make up` | Start the full stack |
 | `make build` | Build all JARs + Docker images |
 | `make migrate` | Run `db-migrations` against the local database |
@@ -223,6 +229,13 @@ Add GET endpoints directly to the command controller to read data. No query serv
 | `make ps` | Show service status |
 | `make down` | Stop all containers |
 | `make clean` | Stop containers and remove volumes |
+| `make replay TENANT=<id>` | Trigger a full tenant event replay (rebuilds read models from outbox history) |
+| `make replay-status JOB=<uuid>` | Poll the status of a running replay job |
+| `make replay-list TENANT=<id>` | List all replay jobs for a tenant |
+| `make new-schema EVENT_TYPE=<type> VERSION=<N> SERVICE=<module>` | Scaffold a new schema JSON file and upcaster Java stub |
+| `make integration-test` | Run all `@Tag("integration")` tests via Testcontainers (requires Docker) |
+| `make set-quota TENANT=<id> TIER=FREE\|PRO\|ENTERPRISE` | Apply a rate-limit tier preset to a tenant |
+| `make rebuild PROJECTION=<name> VERSION=<N> TENANT=<id>` | Trigger a read-model projection rebuild |
 
 ---
 
@@ -298,10 +311,29 @@ Implement `PaymentGateway` and annotate with `@ConditionalOnProperty` to add a p
 
 # Integration tests (requires Docker — Testcontainers spins up Postgres + Kafka)
 ./gradlew integrationTest
+# or via Makefile:
+make integration-test
 
 # Checkstyle
 ./gradlew checkstyleMain
+
+# JMH micro-benchmarks (EventEnvelope serialization — no Docker required)
+./gradlew :shared:shared-db:jmh
+# Results: shared/shared-db/build/results/jmh/results.txt  (human)
+#          shared/shared-db/build/results/jmh/results.json (CI-parseable)
 ```
+
+### Test coverage areas
+
+| Test class | Module | What it covers |
+|---|---|---|
+| `UpcasterChainPropertyTest` | `shared-events` | 10 property invariants for upcaster registration, chain ordering, gap detection (P1–P10) |
+| `DlqRecoveryIdempotencyTest` | `shared-db` | DLQ re-queue safety — `markProcessed` idempotency across `REQUIRES_NEW` transaction boundaries |
+| `OutboxWriterLoadTest` | `shared-db` | 500 concurrent writes (10 threads × 50) against real Postgres; throughput floor > 50 events/sec |
+| `KafkaConsumerLagIntegrationTest` | `example-consumer-service` | Real KafkaContainer; `AdminClient.alterConsumerGroupOffsets` sets lag deterministically; backpressure pause verified |
+| `OutboxNetworkChaosTest` | `shared-db` | Toxiproxy injects 500ms latency, bandwidth-zero partition, and restore; atomicity verified under TCP fault |
+| `OutboxRelayResilienceTest` | `shared-db` | Broker crash, relay crash mid-flight, duplicate event_id constraint, atomic dual-write |
+| `EventEnvelopeSerializationBenchmark` | `shared-db` (JMH) | Throughput and latency for small payload, large payload, minimal envelope, and round-trip |
 
 ---
 
@@ -357,3 +389,8 @@ Full pattern reference: [`BOILERPLATE_SPEC.md`](BOILERPLATE_SPEC.md).
 | Containers | Docker, GHCR |
 | CI/CD | GitHub Actions |
 | Local OIDC | mock-oauth2-server (Okta-compatible) |
+| Error tracking | Sentry (optional — `compileOnly`, activated per service) |
+| Secret rotation | Spring Cloud Context (`ContextRefresher`) |
+| Schema validation | Everit JSON Schema (event payload validation on publish) |
+| Benchmarks | JMH 1.37 via `me.champeau.jmh` Gradle plugin |
+| Network chaos | Toxiproxy (integration tests only) |
