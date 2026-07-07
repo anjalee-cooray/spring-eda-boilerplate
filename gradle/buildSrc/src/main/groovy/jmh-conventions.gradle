@@ -1,0 +1,33 @@
+// Apply the JMH Gradle plugin for micro-benchmark support.
+//
+// Usage: add `id 'jmh-conventions'` to a module's build.gradle plugins block.
+// Benchmark sources live in src/jmh/java/.
+// Run with: ./gradlew :<module>:jmh
+//
+// Results are written to build/results/jmh/results.txt (human) and
+// build/results/jmh/results.json (machine-readable).
+
+plugins {
+    id 'java-conventions'
+    id 'me.champeau.jmh'
+}
+
+jmh {
+    // Run each benchmark 3 times to warm up the JIT before measurements
+    warmupIterations = 3
+    // Take 5 measurement iterations
+    iterations = 5
+    // 2 JVM forks for reproducibility
+    fork = 2
+    // Preview features required for Java 25
+    jvmArgs = ['--enable-preview']
+    // Output formats: text (human-readable) + JSON (CI-parseable)
+    resultFormat = 'JSON'
+    // Human-readable results file
+    humanOutputFile = project.file("${project.buildDir}/results/jmh/results.txt")
+}
+
+dependencies {
+    jmhImplementation 'org.openjdk.jmh:jmh-core:1.37'
+    jmhAnnotationProcessor 'org.openjdk.jmh:jmh-generator-annprocess:1.37'
+}
