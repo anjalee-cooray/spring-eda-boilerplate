@@ -13,4 +13,7 @@ dependencies {
     implementation 'org.postgresql:postgresql'
     implementation 'org.springframework.cloud:spring-cloud-starter-config'
     implementation 'org.springframework.cloud:spring-cloud-starter-bus-kafka'
+
+    // Integration test: real Kafka broker via Testcontainers for lag calculation tests
+    integrationTestImplementation 'org.mockito:mockito-core'
 }
