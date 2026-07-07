@@ -1,0 +1,3 @@
+-- PostgreSQL test database initialization.
+-- PostgreSQL 16 has gen_random_uuid() built-in; no extensions required.
+-- Schema is created by spring.jpa.hibernate.ddl-auto: create-drop in each test.
